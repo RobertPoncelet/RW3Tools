@@ -66,17 +66,13 @@ def parse_idx_file(file_path):
 
 def extract_files_from_dat(dat_file_path, idx_data, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    metadata = {}
+    metadata = []
 
     for section_name, section_data in idx_data.items():
         section_dir = os.path.join(output_dir, section_name)
         os.makedirs(section_dir, exist_ok=True)
 
-        metadata[section_name] = {
-            'type': section_data['type'],
-            'unknown': section_data['unknown'],
-            'entries': []
-        }
+        file_entries = []
 
         for entry in section_data['entries']:
             offset = entry['offset']
@@ -90,12 +86,19 @@ def extract_files_from_dat(dat_file_path, idx_data, output_dir):
             subprocess.run(command)
 
             # Collect metadata needed to reconstruct the idx file
-            metadata[section_name]['entries'].append({
+            file_entries.append({
                 'filename': filename,
                 'file_entry': entry['file_entry']
             })
 
             print(f'Extracted {filename} to {output_file_path}.')
+
+        metadata.append({
+            'name': section_name,
+            'type': section_data['type'],
+            'unknown': section_data['unknown'],
+            'entries': file_entries
+        })
 
     # Save metadata to JSON
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
@@ -107,7 +110,7 @@ def create_idx_file(idx_file_path, metadata, output_dir):
         # Write the 8-byte header
         f.write(b'\xFC\xF5\x02\x00\x10\x00\x00\x00')
 
-        for section_name, section_data in metadata.items():
+        for section_data in metadata:
             # Write the section header
             section_type = section_data['type']
             unknown = section_data['unknown']
@@ -119,7 +122,7 @@ def create_idx_file(idx_file_path, metadata, output_dir):
             else:
                 f.write(struct.pack('<III', section_type, unknown, num_entries))
                 # Write the section name, null-terminated and padded to 4-byte boundary
-                padded_section_name = section_name.encode('ascii') + b'\x00'
+                padded_section_name = section_data["name"].encode('ascii') + b'\x00'
                 f.write(padded_section_name)
                 padding_length = (4 - (len(padded_section_name) % 4)) % 4
                 f.write(b'\x00' * padding_length)
@@ -139,8 +142,8 @@ def create_idx_file(idx_file_path, metadata, output_dir):
 
 def pack_files_to_dat(dat_file_path, metadata, output_dir):
     with open(dat_file_path, 'wb') as dat_file:
-        for section_name, section_data in metadata.items():
-            section_dir = os.path.join(output_dir, section_name)
+        for section_data in metadata.items():
+            section_dir = os.path.join(output_dir, section_data["name"])
 
             for entry in section_data['entries']:
                 filename = entry['filename']
