@@ -1,3 +1,4 @@
+import argparse
 import os
 import struct
 import json
@@ -214,22 +215,32 @@ class DataFile:
             f.write(idx_file.serialize())
 
 
-BASE_DIR = "F:/Google Drive/RW3/assets/"
-INDEX_FILE = "lumpy.idx"
-DATA_FILE = "lumpy.dat"
+# BASE_DIR = "F:/Google Drive/RW3/assets/"
+# INDEX_FILE = "lumpy.idx"
+# DATA_FILE = "lumpy.dat"
 
 
 if __name__ == "__main__":
-    os.chdir(BASE_DIR)
-    idx_data = parse_idx_file(os.path.join(BASE_DIR, INDEX_FILE))
-    print(len(idx_data), "sections:", ", ".join(idx_data.keys()))
-    with open(os.path.join(BASE_DIR, "extracted", "metadata.json")) as f:
-        metadata = json.load(f)
-    pack_files_to_dat(os.path.join(BASE_DIR, "lumpy_test.dat"), metadata, os.path.join(BASE_DIR, "extracted"))
-    #extract_files_from_dat(os.path.join(BASE_DIR, DATA_FILE), idx_data, os.path.join(BASE_DIR, "extracted"))
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Sub-command to run")
 
-"""
-Usage:
-`unpack <index file> <data file> <output dir>` -> Extract all assets from the data file using the index file
-`pack <asset dir> <index file> <data file>` -> Pack all assets from the given directory into the given index/data files
-"""
+    # Unpack command
+    unpack_parser = subparsers.add_parser("unpack", help="Extract all assets from the data file using the index file.")
+    unpack_parser.add_argument("index_file", help="Path to the index file (.idx)")
+    unpack_parser.add_argument("data_file", help="Path to the data file (.dat)")
+    unpack_parser.add_argument("output_dir", help="Directory to extract assets into")
+
+    # Pack command
+    pack_parser = subparsers.add_parser("pack", help="Pack all assets from the given directory into the index and data files.")
+    pack_parser.add_argument("asset_dir", help="Directory containing assets to pack")
+    pack_parser.add_argument("index_file", help="Path to save the index file (.idx)")
+    pack_parser.add_argument("data_file", help="Path to save the data file (.dat)")
+
+    args = parser.parse_args()
+
+    if args.command == "unpack":
+        process_files('read', args.index_file, args.data_file, args.output_dir)
+    elif args.command == "pack":
+        process_files('write', args.index_file, args.data_file, args.asset_dir)
+    else:
+        raise argparse.ArgumentError("Unknown command!")
