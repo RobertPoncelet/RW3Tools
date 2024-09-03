@@ -46,8 +46,8 @@ def parse_idx_file(file_path):
 
         # Parse the file entries in the section
         for _ in range(num_entries):
-            file_entry = struct.unpack_from('<IIII', data, index)
-            index += 16  # Move past the four numbers
+            file_entry = struct.unpack_from('<IIIHH', data, index)
+            index += 16  # Move past the 5 numbers
 
             # Parse the filename
             filename_end = data.index(b'\x00', index) + 1
@@ -77,13 +77,17 @@ def extract_files_from_dat(dat_file_path, idx_data, output_dir):
         for entry in section_data['entries']:
             offset = entry['offset']
             filename = entry['filename']
+            if filename == "arena_list.txt":
+                # TODO: this isn't compressed for some reason??? skip it for now
+                continue
             output_file_path = os.path.join(section_dir, filename)
 
-            # Extract the file using rnc_lib
+            # TODO: check whether decompression is actually needed
+            print("Extracting", output_file_path)
             command = [
                 'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={offset:X}'
             ]
-            subprocess.run(command)
+            subprocess.check_call(command)
 
             # Collect metadata needed to reconstruct the idx file
             file_entries.append({
@@ -131,7 +135,8 @@ def create_idx_file(idx_file_path, metadata, output_dir):
                 # Write the file entry
                 original_entry = entry['file_entry']
                 # Pack the four numbers
-                f.write(struct.pack('<IIII', *original_entry))
+                # TODO: the last one seems to actually be the compressed size (16 bits) followed by some kind of flag
+                f.write(struct.pack('<IIIHH', *original_entry))
 
                 # Write the filename, null-terminated and padded to 4-byte boundary
                 filename = entry['filename'].encode('ascii') + b'\x00'
@@ -148,14 +153,18 @@ def pack_files_to_dat(dat_file_path, metadata, output_dir):
             for entry in section_data['entries']:
                 filename = entry['filename']
                 input_file_path = os.path.join(section_dir, filename)
+                print("Packing", input_file_path)
                 offset = entry['file_entry'][1]
 
-                # Pack the file using rnc_lib.exe
-                temp_dat_path = input_file_path + '.dat'
-                command = [
-                    'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
-                ]
-                subprocess.run(command)
+                if filename != "arena_list.txt":  # TODO: what????
+                    # Pack the file using rnc_lib.exe
+                    temp_dat_path = input_file_path + '.dat'
+                    command = [
+                        'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
+                    ]
+                    subprocess.check_call(command)
+                else:
+                    temp_dat_path = input_file_path
 
                 # Move the packed data to the correct offset in the .dat file
                 with open(temp_dat_path, 'rb') as temp_file:
@@ -177,7 +186,10 @@ DATA_FILE = "lumpy.dat"
 
 
 if __name__ == "__main__":
+    os.chdir(BASE_DIR)
     idx_data = parse_idx_file(os.path.join(BASE_DIR, INDEX_FILE))
     print(len(idx_data), "sections:", ", ".join(idx_data.keys()))
-    os.chdir(BASE_DIR)
-    extract_files_from_dat(os.path.join(BASE_DIR, DATA_FILE), idx_data, os.path.join(BASE_DIR, "extracted"))
+    with open(os.path.join(BASE_DIR, "extracted", "metadata.json")) as f:
+        metadata = json.load(f)
+    pack_files_to_dat(os.path.join(BASE_DIR, "lumpy_test.dat"), metadata, os.path.join(BASE_DIR, "extracted"))
+    #extract_files_from_dat(os.path.join(BASE_DIR, DATA_FILE), idx_data, os.path.join(BASE_DIR, "extracted"))
