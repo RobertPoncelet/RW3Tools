@@ -141,34 +141,34 @@ def create_idx_file(idx_file_path, metadata, output_dir):
 
 
 def pack_files_to_dat(dat_file_path, metadata, output_dir):
-    with open(dat_file_path, 'wb') as dat_file:
-        for section_data in metadata.items():
-            section_dir = os.path.join(output_dir, section_data["name"])
+    for section_data in metadata:
+        section_dir = os.path.join(output_dir, section_data["name"])
 
-            for entry in section_data['entries']:
-                filename = entry['filename']
-                input_file_path = os.path.join(section_dir, filename)
-                offset = entry['file_entry'][1]
+        for entry in section_data['entries']:
+            filename = entry['filename']
+            input_file_path = os.path.join(section_dir, filename)
+            offset = entry['file_entry'][1]
 
-                # Pack the file using rnc_lib.exe
-                temp_dat_path = input_file_path + '.dat'
-                command = [
-                    'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
-                ]
-                subprocess.run(command)
+            # Pack the file using rnc_lib.exe
+            #temp_dat_path = input_file_path + '.dat'
+            command = [
+                #'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
+                'rnc_lib.exe', 'p', input_file_path, dat_file_path, '-m=1'
+            ]
+            subprocess.run(command)
 
-                # Move the packed data to the correct offset in the .dat file
-                with open(temp_dat_path, 'rb') as temp_file:
-                    packed_data = temp_file.read()
+            # # Move the packed data to the correct offset in the .dat file
+            # with open(temp_dat_path, 'rb') as temp_file:
+            #     packed_data = temp_file.read()
 
-                # Seek to the correct offset
-                dat_file.seek(offset)
-                dat_file.write(packed_data)
+            # # Seek to the correct offset
+            # dat_file.seek(offset)
+            # dat_file.write(packed_data)
 
-                # Remove the temporary .dat file
-                os.remove(temp_dat_path)
+            # # Remove the temporary .dat file
+            # os.remove(temp_dat_path)
 
-                print(f'Packed {filename} to {dat_file_path} at offset {offset:X}.')
+            print(f'Packed {filename} to {dat_file_path} at offset {offset:X}.')
 
 
 BASE_DIR = "F:/Google Drive/RW3/assets/"
