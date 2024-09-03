@@ -1,183 +1,217 @@
-import struct, os, subprocess, json
-
-
-def read_string(data, index):
-    string_end = data.index(b'\x00', index) + 1
-    string = data[index:string_end].decode('ascii').rstrip('\x00')
-    index = (string_end + 3) & ~3  # Move to the next 4-byte boundary
-    return string, index
+import os
+import struct
+import json
+import subprocess
+from multiprocessing import Pool, cpu_count
 
 
 UNKNOWN_NAME = "_UNKNOWN"
-WEIRD_SECTION_TYPE = 0x0C
 
 
-def parse_idx_file(file_path):
-    with open(file_path, 'rb') as f:
-        data = f.read()
+class FileEntry:
+    def __init__(self, file_entry=None, filename=None):
+        self.file_entry = file_entry or (0, 0, 0, 0, 0)  # default 5-tuple
+        self.filename = filename or ""
+        self.offset = self.file_entry[1]  # Second number is the offset
+        self.compressed = bool(self.file_entry[4])
 
-    idx_data = {}
-    index = 8  # Skip the first 8 bytes (header)
+    def serialize(self):
+        # Serialize the file entry and filename
+        packed_entry = struct.pack('<IIIHH', *self.file_entry)
+        filename_bytes = self.filename.encode('ascii') + b'\x00'
+        # TODO: surely the padding can't be right if we don't know where we are in the file
+        padding_length = (4 - (len(filename_bytes) % 4)) % 4
+        filename_bytes += b'\x00' * padding_length
+        return packed_entry + filename_bytes
 
-    while index < len(data):
-        # Parse the section header
-        section_type, unknown, num_entries = struct.unpack_from('<III', data, index)
-        index += 12  # Move past the three numbers
+    @classmethod
+    def read_from_file(cls, data, index):
+        # Deserialize the file entry
+        file_entry = struct.unpack_from('<IIIHH', data, index)
+        index += 16  # Move past the numbers
 
-        if section_type == WEIRD_SECTION_TYPE:
-            # Weird special section type
-            temp = num_entries
-            num_entries = unknown  # The number of entries seems to be in the middle this time
-            unknown = temp
-            section_name = UNKNOWN_NAME
+        # Deserialize the filename
+        filename_end = data.index(b'\x00', index) + 1
+        filename = data[index:filename_end].decode('ascii').rstrip('\x00')
+        index = (filename_end + 3) & ~3  # Move to the next 4-byte boundary
+
+        return cls(file_entry=file_entry, filename=filename), index
+
+
+class DataSection:
+    WEIRD_SECTION_TYPE = 0x0C
+
+    def __init__(self, section_type=0, unknown=0, section_name="", entries=None):
+        self.section_type = section_type
+        self.unknown = unknown
+        self.section_name = section_name
+        self.entries = entries or []
+
+    def serialize(self):
+        if self.section_type == self.WEIRD_SECTION_TYPE:
+            packed_header = struct.pack('<III', self.section_type, len(self.entries), self.unknown)
+            section_name_bytes = b""
         else:
-            # Parse the section name
+            packed_header = struct.pack('<III', self.section_type, self.unknown, len(self.entries))
+            section_name_bytes = self.section_name.encode('ascii') + b'\x00'
+            padding_length = (4 - (len(section_name_bytes) % 4)) % 4
+            section_name_bytes += b'\x00' * padding_length
+
+        # Serialize each file entry
+        entry_data = b''.join(entry.serialize() for entry in self.entries)
+        return packed_header + section_name_bytes + entry_data
+
+    @classmethod
+    def read_from_file(cls, data, index):
+        # Deserialize the section header
+        section_type = struct.unpack_from('<I', data, index)
+        index += 4
+
+        if section_type == cls.WEIRD_SECTION_TYPE:
+            num_entries, unknown = struct.unpack_from('<II', data, index)
+            index += 8
+        else:
+            unknown, num_entries = struct.unpack_from('<II', data, index)
+            index += 8
+
+            # Deserialize the section name
             section_name_end = data.index(b'\x00', index) + 1
             section_name = data[index:section_name_end].decode('ascii').rstrip('\x00')
             index = (section_name_end + 3) & ~3  # Move to the next 4-byte boundary
-        print("Parsing section", section_name)
 
-        # Initialize the section in our dictionary
-        idx_data[section_name] = {
-            'type': section_type,
-            'unknown': unknown,
-            'entries': []
-        }
-
-        # Parse the file entries in the section
+        # Deserialize each file entry
+        entries = []
         for _ in range(num_entries):
-            file_entry = struct.unpack_from('<IIIHH', data, index)
-            index += 16  # Move past the 5 numbers
+            entry, index = FileEntry.read_from_file(data, index)
+            entries.append(entry)
 
-            # Parse the filename
-            filename_end = data.index(b'\x00', index) + 1
-            filename = data[index:filename_end].decode('ascii').rstrip('\x00')
-            index = (filename_end + 3) & ~3  # Move to the next 4-byte boundary
-
-            # Store the file entry data
-            idx_data[section_name]['entries'].append({
-                'file_entry': file_entry,
-                'filename': filename,
-                'offset': file_entry[1]  # The second number is the offset in the .dat file
-            })
-
-    return idx_data
+        return cls(section_type=section_type, unknown=unknown, section_name=section_name, entries=entries), index
 
 
-def extract_files_from_dat(dat_file_path, idx_data, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    metadata = []
+class IndexFile:
+    INDEX_HEADER = b'\xFC\xF5\x02\x00\x10\x00\x00\x00'
 
-    for section_name, section_data in idx_data.items():
-        section_dir = os.path.join(output_dir, section_name)
-        os.makedirs(section_dir, exist_ok=True)
+    def __init__(self, sections=None):
+        self.sections = sections or []
 
-        file_entries = []
+    def serialize(self):
+        # Serialize all sections
+        return self.INDEX_HEADER + b''.join(section.serialize() for section in self.sections)
 
-        for entry in section_data['entries']:
-            offset = entry['offset']
-            filename = entry['filename']
-            if filename == "arena_list.txt":
-                # TODO: this isn't compressed for some reason??? skip it for now
-                continue
-            output_file_path = os.path.join(section_dir, filename)
+    @classmethod
+    def read_from_file(cls, file_path):
+        with open(file_path, 'rb') as f:
+            data = f.read()
 
-            # TODO: check whether decompression is actually needed
-            print("Extracting", output_file_path)
-            command = [
-                'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={offset:X}'
-            ]
-            subprocess.check_call(command)
+        sections = []
+        index = len(cls.INDEX_HEADER)  # Skip the first 8 bytes (header)
+        while index < len(data):
+            section, index = DataSection.read_from_file(data, index)
+            sections.append(section)
 
-            # Collect metadata needed to reconstruct the idx file
-            file_entries.append({
-                'filename': filename,
-                'file_entry': entry['file_entry']
-            })
-
-            print(f'Extracted {filename} to {output_file_path}.')
-
-        metadata.append({
-            'name': section_name,
-            'type': section_data['type'],
-            'unknown': section_data['unknown'],
-            'entries': file_entries
-        })
-
-    # Save metadata to JSON
-    with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
-        json.dump(metadata, json_file, indent=4)
+        return cls(sections=sections)
 
 
-def create_idx_file(idx_file_path, metadata, output_dir):
-    with open(idx_file_path, 'wb') as f:
-        # Write the 8-byte header
-        f.write(b'\xFC\xF5\x02\x00\x10\x00\x00\x00')
+class DataFile:
+    def __init__(self, idx_file, dat_file_path):
+        self.idx_file = idx_file
+        self.dat_file_path = dat_file_path
 
-        for section_data in metadata:
-            # Write the section header
-            section_type = section_data['type']
-            unknown = section_data['unknown']
-            num_entries = len(section_data['entries'])
+    def extract_files(self, output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        metadata = {}
 
-            # Handle the weird section type
-            if section_type == WEIRD_SECTION_TYPE:
-                f.write(struct.pack('<III', section_type, num_entries, unknown))
-            else:
-                f.write(struct.pack('<III', section_type, unknown, num_entries))
-                # Write the section name, null-terminated and padded to 4-byte boundary
-                padded_section_name = section_data["name"].encode('ascii') + b'\x00'
-                f.write(padded_section_name)
-                padding_length = (4 - (len(padded_section_name) % 4)) % 4
-                f.write(b'\x00' * padding_length)
+        tasks = []
 
-            for entry in section_data['entries']:
-                # Write the file entry
-                original_entry = entry['file_entry']
-                # Pack the four numbers
-                # TODO: the last one seems to actually be the compressed size (16 bits) followed by some kind of flag
-                f.write(struct.pack('<IIIHH', *original_entry))
+        for section in self.idx_file.sections:
+            section_dir = os.path.join(output_dir, section.section_name)
+            os.makedirs(section_dir, exist_ok=True)
 
-                # Write the filename, null-terminated and padded to 4-byte boundary
-                filename = entry['filename'].encode('ascii') + b'\x00'
-                f.write(filename)
-                padding_length = (4 - (len(filename) % 4)) % 4
-                f.write(b'\x00' * padding_length)
+            metadata[section.section_name] = {
+                'type': section.section_type,
+                'unknown': section.unknown,
+                'entries': []
+            }
 
+            for entry in section.entries:
+                offset = entry.offset
+                filename = entry.filename
+                output_file_path = os.path.join(section_dir, filename)
 
-def pack_files_to_dat(dat_file_path, metadata, output_dir):
-    with open(dat_file_path, 'wb') as dat_file:
-        for section_data in metadata:
-            section_dir = os.path.join(output_dir, section_data["name"])
+                tasks.append((self.dat_file_path, output_file_path, offset))
 
-            for entry in section_data['entries']:
-                filename = entry['filename']
+                # Collect metadata needed to reconstruct the idx file
+                metadata[section.section_name]['entries'].append({
+                    'filename': filename,
+                    'file_entry': entry.file_entry
+                })
+
+        # Run extraction tasks in parallel using multiprocessing
+        with Pool(cpu_count()) as pool:
+            pool.map(self._extract_file, tasks)
+
+        # Save metadata to JSON
+        with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
+            json.dump(metadata, json_file, indent=4)
+
+    def _extract_file(self, args):
+        dat_file_path, output_file_path, offset = args
+        command = [
+            'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={offset:X}'
+        ]
+        subprocess.check_call(command, check=True)
+        print(f'Extracted {os.path.basename(output_file_path)} to {output_file_path}.')
+
+    def pack_files(self, output_dir):
+        with open(os.path.join(output_dir, 'metadata.json'), 'r') as json_file:
+            metadata = json.load(json_file)
+
+        for section_name, section_data in metadata.items():
+            section_dir = os.path.join(output_dir, section_name)
+
+            for entry_data in section_data['entries']:
+                filename = entry_data['filename']
                 input_file_path = os.path.join(section_dir, filename)
-                print("Packing", input_file_path)
-                offset = entry['file_entry'][1]
+                offset = entry_data['file_entry'][1]
 
-                if filename != "arena_list.txt":  # TODO: what????
-                    # Pack the file using rnc_lib.exe
-                    temp_dat_path = input_file_path + '.dat'
-                    command = [
-                        'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
-                    ]
-                    subprocess.check_call(command)
-                else:
-                    temp_dat_path = input_file_path
+                temp_dat_path = input_file_path + '.dat'
+                command = [
+                    'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
+                ]
+                subprocess.check_call(command, check=True)
 
-                # Move the packed data to the correct offset in the .dat file
                 with open(temp_dat_path, 'rb') as temp_file:
                     packed_data = temp_file.read()
 
-                # Seek to the correct offset
-                dat_file.seek(offset)
-                dat_file.write(packed_data)
+                with open(self.dat_file_path, 'r+b') as dat_file:
+                    dat_file.seek(offset)
+                    dat_file.write(packed_data)
 
-                # Remove the temporary .dat file
                 os.remove(temp_dat_path)
 
-                print(f'Packed {filename} to {dat_file_path} at offset {offset:X}.')
+                print(f'Packed {filename} to {self.dat_file_path} at offset {offset:X}.')
+
+    def create_idx_file(self, output_path):
+        with open(os.path.join(output_path, 'metadata.json'), 'r') as json_file:
+            metadata = json.load(json_file)
+
+        sections = []
+        for section_name, section_data in metadata.items():
+            entries = [
+                FileEntry(file_entry=entry['file_entry'], filename=entry['filename'])
+                for entry in section_data['entries']
+            ]
+            section = DataSection(
+                section_type=section_data['type'],
+                unknown=section_data['unknown'],
+                section_name=section_name,
+                entries=entries
+            )
+            sections.append(section)
+
+        idx_file = IndexFile(sections)
+        with open(output_path, 'wb') as f:
+            f.write(idx_file.serialize())
 
 
 BASE_DIR = "F:/Google Drive/RW3/assets/"
@@ -193,3 +227,9 @@ if __name__ == "__main__":
         metadata = json.load(f)
     pack_files_to_dat(os.path.join(BASE_DIR, "lumpy_test.dat"), metadata, os.path.join(BASE_DIR, "extracted"))
     #extract_files_from_dat(os.path.join(BASE_DIR, DATA_FILE), idx_data, os.path.join(BASE_DIR, "extracted"))
+
+"""
+Usage:
+`unpack <index file> <data file> <output dir>` -> Extract all assets from the data file using the index file
+`pack <asset dir> <index file> <data file>` -> Pack all assets from the given directory into the given index/data files
+"""
