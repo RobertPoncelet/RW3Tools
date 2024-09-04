@@ -1,8 +1,9 @@
 import argparse
+import json
 import os
 import struct
-import json
 import subprocess
+from collections import defaultdict
 from multiprocessing import Pool, cpu_count
 
 
@@ -186,23 +187,22 @@ class AssetData:
             section_dir = os.path.join(output_dir, section.extracted_dir_name())
             os.makedirs(section_dir, exist_ok=True)
 
-            entries_metadata = []
+            entries_metadata = defaultdict(dict)
 
             for entry in section.entries:
-                filename = entry.filename
-                output_file_path = os.path.join(section_dir, filename)
+                output_file_path = os.path.join(section_dir, entry.filename)
 
                 tasks.append((self.dat_file_path, output_file_path, entry))
 
                 # Collect metadata needed to reconstruct the idx file
-                entries_metadata.append({
-                    'filename': filename,
-                    'file_entry': entry.file_entry
-                })
+                if not entry.is_compressed():
+                    entries_metadata[entry.filename]["is_compressed"] = False
+                if entry.flags():
+                    entries_metadata[entry.filename]["flags"] = entry.flags()
             
             sections_metadata.append({
                 'name': section.extracted_dir_name(),
-                'type': section.section_size,
+                'size': section.section_size,  # TODO: this shouldn't be necessary
                 'unknown': section.unknown,
                 'entries': entries_metadata
             })
