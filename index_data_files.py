@@ -71,7 +71,7 @@ class IndexSection:
     @classmethod
     def read_from_file(cls, data, index):
         # Deserialize the section header
-        section_type = struct.unpack_from('<I', data, index)
+        section_type = struct.unpack_from('<I', data, index)[0]
         index += 4
 
         if section_type == cls.WEIRD_SECTION_TYPE:
@@ -86,6 +86,7 @@ class IndexSection:
             section_name_end = data.index(b'\x00', index) + 1
             section_name = data[index:section_name_end].decode('ascii').rstrip('\x00')
             index = (section_name_end + 3) & ~3  # Move to the next 4-byte boundary
+        print(f"Reading section {section_name or cls.UNKNOWN_SECTION_NAME} with {num_entries} entries")
 
         # Deserialize each file entry
         entries = []
@@ -150,7 +151,7 @@ class AssetData:
                 })
             
             sections_metadata.append({
-                'name': section.section_name,
+                'name': section.extracted_dir_name(),
                 'type': section.section_type,
                 'unknown': section.unknown,
                 'entries': entries_metadata
