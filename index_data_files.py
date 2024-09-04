@@ -119,6 +119,27 @@ class AssetIndex:
             sections.append(section)
 
         return cls(sections=sections)
+    
+    @classmethod
+    def from_asset_dir(cls, asset_dir):
+        with open(os.path.join(asset_dir, 'metadata.json'), 'r') as json_file:
+            metadata = json.load(json_file)
+
+        sections = []
+        for section_data in metadata:
+            entries = [
+                FileEntry(file_entry=entry['file_entry'], filename=entry['filename'])
+                for entry in section_data['entries']
+            ]
+            section = IndexSection(
+                section_type=section_data['type'],
+                unknown=section_data['unknown'],
+                section_name=section_data['name'],
+                entries=entries
+            )
+            sections.append(section)
+
+        return cls(sections)
 
 
 class AssetData:
@@ -199,24 +220,7 @@ class AssetData:
 
     @classmethod
     def from_asset_dir(cls, asset_dir, dat_file_path):
-        with open(os.path.join(asset_dir, 'metadata.json'), 'r') as json_file:
-            metadata = json.load(json_file)
-
-        sections = []
-        for section_data in metadata:
-            entries = [
-                FileEntry(file_entry=entry['file_entry'], filename=entry['filename'])
-                for entry in section_data['entries']
-            ]
-            section = IndexSection(
-                section_type=section_data['type'],
-                unknown=section_data['unknown'],
-                section_name=section_data['name'],
-                entries=entries
-            )
-            sections.append(section)
-
-        asset_index = AssetIndex(sections)
+        asset_index = AssetIndex.from_asset_dir(asset_dir)
         return cls(asset_index, dat_file_path)
 
 
