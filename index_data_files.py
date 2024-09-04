@@ -11,8 +11,17 @@ class FileEntry:
         self.file_entry = file_entry or (0, 0, 0, 0, 0)  # default 5-tuple
         self.filename = filename or ""
     
+    def entry_size(self):
+        return self.file_entry[0]
+    
     def offset(self):
-        return self.file_entry[1]  # Second number is the offset
+        return self.file_entry[1]
+
+    def uncompressed_file_size(self):
+        return self.file_entry[2]
+    
+    def compressed_file_size(self):
+        return self.file_entry[3]
 
     def is_compressed(self):
         return bool(self.file_entry[4])
@@ -21,28 +30,47 @@ class FileEntry:
         # Serialize the file entry and filename
         packed_entry = struct.pack('<IIIHH', *self.file_entry)
         filename_bytes = self.filename.encode('ascii') + b'\x00'
-        # TODO: surely the padding length can't be right if we don't know where we are in the file
         padding_length = (4 - (len(filename_bytes) % 4)) % 4
         filename_bytes += b'\x00' * padding_length
         return packed_entry + filename_bytes
 
     @classmethod
     def read_from_file(cls, data, index):
+        entry_size = struct.unpack_from('<I', data, index)[0]
+        entry_data = data[index:index+entry_size]
         # Deserialize the file entry
-        file_entry = struct.unpack_from('<IIIHH', data, index)
-        index += 16  # Move past the numbers
+        file_entry = struct.unpack_from('<IIIHH', entry_data)
 
         # Deserialize the filename
-        filename_end = data.index(b'\x00', index) + 1
-        filename = data[index:filename_end].decode('ascii').rstrip('\x00')
-        index = (filename_end + 3) & ~3  # Move to the next 4-byte boundary
+        filename = entry_data[16:].decode('ascii').rstrip('\x00')
 
-        return cls(file_entry=file_entry, filename=filename), index
+        return cls(file_entry=file_entry, filename=filename), index + entry_size
 
 
 class IndexSection:
     WEIRD_SECTION_TYPE = 0x0C
     UNKNOWN_SECTION_NAME = "_UNKNOWN"
+    SECTION_LIST = [
+        UNKNOWN_SECTION_NAME,
+        'arenas',
+        'components',
+        'armour',
+        'chassis',
+        'drive',
+        'locomotion',
+        'power',
+        'weapon',
+        'fonts',
+        'Graphics',
+        'Language',
+        'robots',
+        'powertrain',
+        'UI2',
+        'objects',
+        'Tournaments',
+        'particles',
+        'crowd'
+    ]
 
     def __init__(self, section_type=0, unknown=0, section_name=None, entries=None):
         self.section_type = section_type
@@ -86,7 +114,6 @@ class IndexSection:
             section_name_end = data.index(b'\x00', index) + 1
             section_name = data[index:section_name_end].decode('ascii').rstrip('\x00')
             index = (section_name_end + 3) & ~3  # Move to the next 4-byte boundary
-        print(f"Reading section {section_name or cls.UNKNOWN_SECTION_NAME} with {num_entries} entries")
 
         # Deserialize each file entry
         entries = []
@@ -163,7 +190,7 @@ class AssetData:
                 filename = entry.filename
                 output_file_path = os.path.join(section_dir, filename)
 
-                tasks.append((self.dat_file_path, output_file_path, entry.offset()))
+                tasks.append((self.dat_file_path, output_file_path, entry))
 
                 # Collect metadata needed to reconstruct the idx file
                 entries_metadata.append({
@@ -187,11 +214,18 @@ class AssetData:
             json.dump(sections_metadata, json_file, indent=4)
 
     def _extract_file(self, args):
-        dat_file_path, output_file_path, offset = args
-        command = [
-            'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={offset:X}'
-        ]
-        subprocess.check_call(command)
+        dat_file_path, output_file_path, entry = args
+        if entry.is_compressed():
+            command = [
+                'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={entry.offset():X}'
+            ]
+            subprocess.check_call(command)
+        else:
+            print(entry.filename, "is not compressed.")
+            with open(dat_file_path, "rb") as dat_file:
+                dat_file.seek(entry.offset())
+                with open(output_file_path, "wb") as out_file:
+                    out_file.write(dat_file.read(entry.uncompressed_file_size()))
         print(f'Extracted {os.path.basename(output_file_path)} to {output_file_path}.')
 
     def pack_files(self, asset_dir):
