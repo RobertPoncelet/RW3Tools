@@ -11,24 +11,48 @@ class FileEntry:
     def __init__(self, file_entry=None, filename=None):
         self.file_entry = file_entry or (0, 0, 0, 0, 0)  # default 5-tuple
         self.filename = filename or ""
+        self.real_uncompressed_size = None
+        self.real_compressed_size = None
     
     def entry_size(self):
         return self.file_entry[0]
     
     def offset(self):
         return self.file_entry[1]
+    
+    def update_from_data_file(self, data_file):
+        # For some reason, certain files are marked as size 0 in the index, even though they exist
+        # in the data file. In these cases, we need to check the data file itself.
+        if self.file_entry[3] != 0 and self.file_entry[2] != 0:
+            return
+
+        data_file.seek(self.offset())
+        if data_file.read(4) == b"\x52\x4E\x42\x01":  # "RNC 1"
+            self.real_uncompressed_size = self.struct.unpack_from('>I', data_file.read(4))[0]
+            self.real_compressed_size = self.struct.unpack_from('>I', data_file.read(4))[0]
+        else:
+            # Fuck knows
+            self.real_compressed_size = self.real_uncompressed_size = 0x800
+
+    def _file_size(self, compressed):
+        size = self.file_entry[3 if compressed else 2]
+        if size == 0:
+            size = self.real_compressed_size if compressed else self.real_uncompressed_size
+        if not size:
+            raise ValueError("Size can't be 0! Should probably update this entry from the data file first.")
+        return size
 
     def uncompressed_file_size(self):
-        return self.file_entry[2]
+        return self._file_size(False)
     
     def compressed_file_size(self):
-        return self.file_entry[3]
+        return self._file_size(True)
     
     def flags(self):
         return self.file_entry[4]
 
     def is_compressed(self):
-        return bool(self.file_entry[5])
+        return bool(self.file_entry[5]) or self.compressed_file_size() != self.uncompressed_file_size()
 
     def write_to_file(self):
         # Serialize the file entry and filename
@@ -55,27 +79,6 @@ class FileEntry:
 
 class IndexSection:
     UNKNOWN_SECTION_NAME = "_UNKNOWN"
-    SECTION_LIST = [
-        UNKNOWN_SECTION_NAME,
-        'arenas',
-        'components',
-        'armour',
-        'chassis',
-        'drive',
-        'locomotion',
-        'power',
-        'weapon',
-        'fonts',
-        'Graphics',
-        'Language',
-        'robots',
-        'powertrain',
-        'UI2',
-        'objects',
-        'Tournaments',
-        'particles',
-        'crowd'
-    ]
 
     def __init__(self, section_size=0, unknown=0, section_name=None, entries=None):
         self.section_size = section_size
@@ -183,29 +186,31 @@ class AssetData:
         sections_metadata = []
         tasks = []
 
-        for section in self.asset_index.sections:
-            section_dir = os.path.join(output_dir, section.extracted_dir_name())
-            os.makedirs(section_dir, exist_ok=True)
+        with open(self.dat_file_path, "rb") as data_file:
+            for section in self.asset_index.sections:
+                section_dir = os.path.join(output_dir, section.extracted_dir_name())
+                os.makedirs(section_dir, exist_ok=True)
 
-            entries_metadata = defaultdict(dict)
+                entries_metadata = defaultdict(dict)
 
-            for entry in section.entries:
-                output_file_path = os.path.join(section_dir, entry.filename)
+                for entry in section.entries:
+                    entry.update_from_data_file(data_file)
+                    output_file_path = os.path.join(section_dir, entry.filename)
 
-                tasks.append((self.dat_file_path, output_file_path, entry))
+                    tasks.append((self.dat_file_path, output_file_path, entry))
 
-                # Collect metadata needed to reconstruct the idx file
-                if not entry.is_compressed():
-                    entries_metadata[entry.filename]["is_compressed"] = False
-                if entry.flags():
-                    entries_metadata[entry.filename]["flags"] = entry.flags()
-            
-            sections_metadata.append({
-                'name': section.extracted_dir_name(),
-                'size': section.section_size,  # TODO: this shouldn't be necessary
-                'unknown': section.unknown,
-                'entries': entries_metadata
-            })
+                    # Collect metadata needed to reconstruct the idx file
+                    if not entry.is_compressed():
+                        entries_metadata[entry.filename]["is_compressed"] = False
+                    if entry.flags():
+                        entries_metadata[entry.filename]["flags"] = entry.flags()
+                
+                sections_metadata.append({
+                    'name': section.extracted_dir_name(),
+                    'size': section.section_size,  # TODO: this shouldn't be necessary
+                    'unknown': section.unknown,
+                    'entries': entries_metadata
+                })
 
         # Save metadata to JSON
         with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
