@@ -22,13 +22,16 @@ class FileEntry:
     
     def compressed_file_size(self):
         return self.file_entry[3]
+    
+    def flags(self):
+        return self.file_entry[4]
 
     def is_compressed(self):
-        return bool(self.file_entry[4])
+        return bool(self.file_entry[5])
 
     def write_to_file(self):
         # Serialize the file entry and filename
-        packed_entry = struct.pack('<IIIHH', *self.file_entry)
+        packed_entry = struct.pack('<IIIHBB', *self.file_entry)
         filename_bytes = self.filename.encode('ascii') + b'\x00'
         padding_length = (4 - (len(filename_bytes) % 4)) % 4
         filename_bytes += b'\x00' * padding_length
@@ -41,7 +44,7 @@ class FileEntry:
         index += entry_size
 
         # Deserialize the file entry
-        file_entry = struct.unpack_from('<IIIHH', entry_data)
+        file_entry = list(struct.unpack_from('<IIIHBB', entry_data))
 
         # Deserialize the filename
         filename = entry_data[16:].decode('ascii').rstrip('\x00')
@@ -113,7 +116,6 @@ class IndexSection:
                 assert num_entries == 0
             # Deserialize the section name
             section_name = section_data[12:].decode('ascii').rstrip('\x00')
-        print(f"Reading section {section_name} with {num_entries} entries (unknown {unknown})")
 
         # Deserialize each file entry
         entries = []
@@ -205,13 +207,13 @@ class AssetData:
                 'entries': entries_metadata
             })
 
-        # Run extraction tasks in parallel using multiprocessing
-        with Pool(cpu_count()) as pool:
-            pool.map(self._extract_file, tasks)
-
         # Save metadata to JSON
         with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
             json.dump(sections_metadata, json_file, indent=4)
+
+        # Run extraction tasks in parallel using multiprocessing
+        with Pool(cpu_count()) as pool:
+            pool.map(self._extract_file, tasks)
 
     def _extract_file(self, args):
         dat_file_path, output_file_path, entry = args
@@ -219,7 +221,7 @@ class AssetData:
             command = [
                 'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={entry.offset():X}'
             ]
-            subprocess.check_call(command)
+            subprocess.check_call(command, stdout=subprocess.DEVNULL)
         else:
             print(entry.filename, "is not compressed.")
             with open(dat_file_path, "rb") as dat_file:
@@ -239,7 +241,7 @@ class AssetData:
                 command = [
                     'rnc_lib.exe', 'p', input_file_path, temp_dat_path, '-m=1'
                 ]
-                subprocess.check_call(command)
+                subprocess.check_call(command, stdout=subprocess.DEVNULL)
 
                 with open(temp_dat_path, 'rb') as temp_file:
                     packed_data = temp_file.read()
