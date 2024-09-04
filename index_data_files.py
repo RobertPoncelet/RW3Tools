@@ -38,17 +38,18 @@ class FileEntry:
     def read_from_file(cls, data, index):
         entry_size = struct.unpack_from('<I', data, index)[0]
         entry_data = data[index:index+entry_size]
+        index += entry_size
+
         # Deserialize the file entry
         file_entry = struct.unpack_from('<IIIHH', entry_data)
 
         # Deserialize the filename
         filename = entry_data[16:].decode('ascii').rstrip('\x00')
 
-        return cls(file_entry=file_entry, filename=filename), index + entry_size
+        return cls(file_entry=file_entry, filename=filename), index
 
 
 class IndexSection:
-    WEIRD_SECTION_TYPE = 0x0C
     UNKNOWN_SECTION_NAME = "_UNKNOWN"
     SECTION_LIST = [
         UNKNOWN_SECTION_NAME,
@@ -72,8 +73,8 @@ class IndexSection:
         'crowd'
     ]
 
-    def __init__(self, section_type=0, unknown=0, section_name=None, entries=None):
-        self.section_type = section_type
+    def __init__(self, section_size=0, unknown=0, section_name=None, entries=None):
+        self.section_size = section_size
         self.unknown = unknown
         self._section_name = section_name
         self.entries = entries or []
@@ -82,12 +83,12 @@ class IndexSection:
         return self._section_name or self.UNKNOWN_SECTION_NAME
 
     def write_to_file(self):
-        if self.section_type == self.WEIRD_SECTION_TYPE:
-            packed_header = struct.pack('<III', self.section_type, len(self.entries), self.unknown)
+        if self.section_size == 12:  # No name
+            packed_header = struct.pack('<III', self.section_size, len(self.entries), self.unknown)
             section_name_bytes = b""
         else:
             assert self._section_name
-            packed_header = struct.pack('<III', self.section_type, self.unknown, len(self.entries))
+            packed_header = struct.pack('<III', self.section_size, self.unknown, len(self.entries))
             section_name_bytes = self._section_name.encode('ascii') + b'\x00'
             padding_length = (4 - (len(section_name_bytes) % 4)) % 4
             section_name_bytes += b'\x00' * padding_length
@@ -99,21 +100,20 @@ class IndexSection:
     @classmethod
     def read_from_file(cls, data, index):
         # Deserialize the section header
-        section_type = struct.unpack_from('<I', data, index)[0]
-        index += 4
+        section_size = struct.unpack_from('<I', data, index)[0]
+        section_data = data[index:index+section_size]
+        index += section_size
 
-        if section_type == cls.WEIRD_SECTION_TYPE:
-            num_entries, unknown = struct.unpack_from('<II', data, index)
+        if section_size == 12:  # No name
+            _, num_entries, unknown = struct.unpack_from('<III', section_data)
             section_name = None
-            index += 8
         else:
-            unknown, num_entries = struct.unpack_from('<II', data, index)
-            index += 8
-
+            _, unknown, num_entries = struct.unpack_from('<III', section_data)
+            if unknown:
+                assert num_entries == 0
             # Deserialize the section name
-            section_name_end = data.index(b'\x00', index) + 1
-            section_name = data[index:section_name_end].decode('ascii').rstrip('\x00')
-            index = (section_name_end + 3) & ~3  # Move to the next 4-byte boundary
+            section_name = section_data[12:].decode('ascii').rstrip('\x00')
+        print(f"Reading section {section_name} with {num_entries} entries (unknown {unknown})")
 
         # Deserialize each file entry
         entries = []
@@ -121,7 +121,7 @@ class IndexSection:
             entry, index = FileEntry.read_from_file(data, index)
             entries.append(entry)
 
-        return cls(section_type=section_type, unknown=unknown, section_name=section_name, entries=entries), index
+        return cls(section_size=section_size, unknown=unknown, section_name=section_name, entries=entries), index
 
 
 class AssetIndex:
@@ -159,7 +159,7 @@ class AssetIndex:
                 for entry in section_data['entries']
             ]
             section = IndexSection(
-                section_type=section_data['type'],
+                section_size=section_data['type'],
                 unknown=section_data['unknown'],
                 section_name=section_data['name'],
                 entries=entries
@@ -200,7 +200,7 @@ class AssetData:
             
             sections_metadata.append({
                 'name': section.extracted_dir_name(),
-                'type': section.section_type,
+                'type': section.section_size,
                 'unknown': section.unknown,
                 'entries': entries_metadata
             })
