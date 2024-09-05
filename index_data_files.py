@@ -332,7 +332,7 @@ class AssetData:
         for section in self.asset_index.sections:
             section_dir = os.path.join(asset_dir, section.extracted_dir_name())
 
-            with open(self.dat_file_path, 'wb') as dat_file:
+            with open(self.dat_file_path, 'rb+') as dat_file:
                 for entry in section.entries:
                     input_file_path = os.path.join(section_dir, entry.filename)
 
