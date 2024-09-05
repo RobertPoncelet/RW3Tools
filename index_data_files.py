@@ -14,13 +14,15 @@ def byte_pad_string(string):
     return string_bytes + b'\x00' * padding_length
 
 
-class FileEntry:
-    def __init__(self, filename, file_entry=None):
+class IndexFileEntry:
+    def __init__(self, filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file):
         self.filename = filename
-        self.file_entry = file_entry or [0] * 6
-        self.real_uncompressed_size = None
-        self.real_compressed_size = None
-        self._cached_compressed_path = None
+        self._offset = offset
+        self._uncompressed_size = uncompressed_size
+        self._compressed_size = compressed_size
+        self._is_compressed = is_compressed
+        self._is_ghost_file = is_ghost_file
+        self._cached_compressed_path = None  # TODO: remove this
 
     def __del__(self):
         if self._cached_compressed_path:
@@ -30,32 +32,36 @@ class FileEntry:
         return 16 + len(byte_pad_string(self.filename))
     
     def offset(self):
-        return self.file_entry[1]
+        if self._offset == None:
+            raise ValueError("f{self.filename} has no offset!")
+        return self._offset
     
     def update_from_data_file(self, data_file):
-        # For some reason, certain files are marked as size 0 in the index, even though they exist
-        # in the data file. In these cases, we need to check the data file itself.
+        print(f"updating {self.filename} from {data_file}")
+        # For some reason, certain "ghost" files are marked as size 0 in the index, even though
+        # they exist in the data file. In these cases, we need to check the data file itself.
         if not self.is_ghost_file():
             return
 
         data_file.seek(self.offset())
         header = data_file.read(4)
         if header == b"RNC\x01":  # RNC compression
-            self.real_uncompressed_size = struct.unpack_from('>I', data_file.read(4))[0]
-            print(f"Real uncompressed size of {self.filename}: {self.real_uncompressed_size}")
-            self.real_compressed_size = struct.unpack_from('>I', data_file.read(4))[0]
-            print(f"Real compressed size of {self.filename}: {self.real_compressed_size}")
+            self._is_compressed = True
+            self._uncompressed_size = struct.unpack_from('>I', data_file.read(4))[0]
+            print(f"Real uncompressed size of {self.filename}: {self._uncompressed_size}")
+            self._compressed_size = struct.unpack_from('>I', data_file.read(4))[0]
+            self._compressed_size += 18  # Account for the RNC header
+            print(f"Real compressed size of {self.filename}: {self._compressed_size}")
         else:
+            assert not self.is_compressed()
             # Fuck knows
-            self.real_compressed_size = self.real_uncompressed_size = 0x800
+            self._compressed_size = self._uncompressed_size = 0x800
 
     def is_ghost_file(self):
-        return self.file_entry[2] == 0 or self.file_entry[3] == 0
+        return self._is_ghost_file
     
     def _file_size(self, compressed):
-        size = self.file_entry[3 if compressed else 2]
-        if size == 0:
-            size = self.real_compressed_size if compressed else self.real_uncompressed_size
+        size = self._compressed_size if compressed else self._uncompressed_size
         if not size:
             raise ValueError("Size can't be 0! Should probably update this entry from the data file first.")
         return size
@@ -65,43 +71,54 @@ class FileEntry:
     
     def compressed_file_size(self):
         return self._file_size(True)
-    
-    def flags(self):
-        return self.file_entry[4]
 
     def is_compressed(self):
-        return bool(self.file_entry[5]) or self.compressed_file_size() != self.uncompressed_file_size()
+        return self._is_compressed
 
-    def write_to_file(self):
+    def write_to_file(self, file):
         # Serialize the file entry and filename
-        print(self.filename, self.file_entry)
-        packed_entry = struct.pack('<IIIHBB', *self.file_entry)
-        return packed_entry + byte_pad_string(self.filename)
+        if self.is_ghost_file():
+            uncompressed_size = packed_compression = 0
+        else:
+            uncompressed_size = self.uncompressed_file_size()
+            packed_compression = self.compressed_file_size()
+
+        if self.is_compressed():
+            packed_compression |= (1 << 31)
+        else:
+            packed_compression &= ~(1 << 31)
+
+        packed_entry = struct.pack('<IIII', 
+                                   self.entry_size(),
+                                   self.offset(),
+                                   uncompressed_size,
+                                   packed_compression
+                                  )
+        file.write(packed_entry + byte_pad_string(self.filename))
 
     @classmethod
-    def read_from_file(cls, data, index):
-        entry_size = struct.unpack_from('<I', data, index)[0]
-        entry_data = data[index:index+entry_size]
-        index += entry_size
+    def read_from_file(cls, file):
+        entry_size = struct.unpack_from('<I', file.read(4))[0]
+        entry_data = file.read(entry_size - 4)
 
         # Deserialize the file entry
-        file_entry = list(struct.unpack_from('<IIIHBB', entry_data))
+        offset, uncompressed_size, packed_compression = struct.unpack_from('<III', entry_data)
+        is_compressed = bool(packed_compression & (1 << 31))
+        compressed_size = packed_compression & 0x7FFFFFFF
+        is_ghost_file = compressed_size == 0 and uncompressed_size == 0
 
         # Deserialize the filename
-        filename = entry_data[16:].decode('ascii').rstrip('\x00')
+        filename = entry_data[12:].decode('ascii').rstrip('\x00')
 
-        return cls(file_entry=file_entry, filename=filename), index
-    
-    @staticmethod
-    def compressed_path(path):
-        return os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.dat")
+        return cls(filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file)
 
     @staticmethod
-    def compress_file(path):
-        temp_dat_path = FileEntry.compressed_path(path)
-        # TODO: check file date etc.
-        if os.path.isfile(temp_dat_path):
+    def compressed_file(path):
+        temp_dat_path = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.dat")
+        if os.path.isfile(temp_dat_path) and os.path.getmtime(path) < os.path.getmtime(temp_dat_path):
             return temp_dat_path
+
+        print(f"Compressing {path}...")
         command = [
             'rnc_lib.exe', 'p', path, temp_dat_path, '-m=1'
         ]
@@ -114,40 +131,29 @@ class FileEntry:
         filename = os.path.basename(path)
         assert not filename.startswith(".")
 
-        # TODO: this "file_entry" stuff needs refactoring
-        file_entry = [
-            16 + len(byte_pad_string(filename)),  # Entry size
-            entry_metadata["offset"],  # TODO: calculate the offset as needed when writing the data file
-            os.path.getsize(path),  # Uncompressed size
-            None, #cls.compressed_size_from_path(path, entry_metadata),  # Compressed size
-            None, #entry_metadata.get("flags", 0),  # Flags(?)
-            0x80 if entry_metadata.get("is_compressed", True) else 0x00  # Is compressed
-        ]
-
-        entry = FileEntry(filename, file_entry)
-    
-        # Let's hack in the compressed size for now
-        if entry_metadata.get("is_compressed", True):
-            entry._cached_compressed_path = cls.compress_file(path)
-            compressed_size = os.path.getsize(entry._cached_compressed_path)
+        compressed = entry_metadata.get("is_compressed", True)
+        if compressed:
+            compressed_path = cls.compressed_file(path)
+            compressed_size = os.path.getsize(compressed_path)
         else:
             compressed_size = os.path.getsize(path)
-        entry.file_entry[3] = compressed_size & 0xFFFF
-        entry.file_entry[4] = compressed_size // 0xFFFF
 
-        if entry_metadata.get("is_ghost_file", False):
-            entry.real_uncompressed_size = file_entry[2]
-            entry.real_compressed_size = file_entry[3]
-            entry.file_entry[2] = entry.file_entry[3] = 0
-        print("Created FileEntry for", path)
+        entry = IndexFileEntry(filename,
+                               offset=entry_metadata["offset"],  # TODO: calculate the offset as needed when writing the data file
+                               uncompressed_size=os.path.getsize(path),
+                               compressed_size=compressed_size,
+                               is_compressed=compressed,
+                               is_ghost_file=entry_metadata.get("is_ghost_file", False))
+        if compressed:
+            entry._cached_compressed_path = compressed_path
+
         return entry
 
 
 class IndexSection:
     UNKNOWN_SECTION_NAME = "_UNKNOWN"
 
-    def __init__(self, unknown=0, section_name=None, entries=None):
-        self.unknown = unknown
+    def __init__(self, section_name=None, entries=None):
         if section_name == self.UNKNOWN_SECTION_NAME:
             self._section_name = None
         else:
@@ -165,47 +171,45 @@ class IndexSection:
     
     def section_size(self):
         return 12 + len(self.section_name_padded())
+    
+    def unknown(self):
+        return 0 if self.entries else 6
 
-    def write_to_file(self):
+    def write_to_file(self, file):
         if not self._section_name:  # NOTE: number of entries and unknown are swapped for some reason
-            packed_header = struct.pack('<III', self.section_size(), len(self.entries), self.unknown)
+            packed_header = struct.pack('<III', self.section_size(), len(self.entries), self.unknown())
         else:
-            packed_header = struct.pack('<III', self.section_size(), self.unknown, len(self.entries))
+            packed_header = struct.pack('<III', self.section_size(), self.unknown(), len(self.entries))
 
-        # Serialize each file entry
-        entry_data = b''.join(entry.write_to_file() for entry in self.entries)
-        return packed_header + self.section_name_padded() + entry_data
+        file.write(packed_header + self.section_name_padded())
+        for entry in self.entries:
+            entry.write_to_file(file)
 
     @classmethod
-    def read_from_file(cls, data, index):
+    def read_from_file(cls, file):
         # Deserialize the section header
-        section_size = struct.unpack_from('<I', data, index)[0]
-        section_data = data[index:index+section_size]
-        index += section_size
+        section_size = struct.unpack_from('<I', file.read(4))[0]
+        section_data = file.read(section_size - 4)
 
         if section_size == 12:  # No name
-            _, num_entries, unknown = struct.unpack_from('<III', section_data)
+            num_entries, unknown = struct.unpack_from('<II', section_data)
             section_name = None
         else:
-            _, unknown, num_entries = struct.unpack_from('<III', section_data)
+            unknown, num_entries = struct.unpack_from('<II', section_data)
             if unknown:
-                assert num_entries == 0
+                assert num_entries == 0 and unknown == 6
             # Deserialize the section name
-            section_name = section_data[12:].decode('ascii').rstrip('\x00')
+            section_name = section_data[8:].decode('ascii').rstrip('\x00')
 
         # Deserialize each file entry
-        entries = []
-        for _ in range(num_entries):
-            entry, index = FileEntry.read_from_file(data, index)
-            entries.append(entry)
-
-        return cls(unknown=unknown, section_name=section_name, entries=entries), index
+        entries = [IndexFileEntry.read_from_file(file) for _ in range(num_entries)]
+        return cls(section_name=section_name, entries=entries)
     
     @classmethod
     def from_path(cls, path, section_metadata):
         # Replicate the filename ordering of the original index file
         def filename_key(filename):
-            filename = filename.lower().replace("_", "z")
+            filename = filename.lower().replace("_", "~")
             parts = re.findall(r'\d+|\D', filename)
             def number_if_possible(s):
                 try:
@@ -219,8 +223,8 @@ class IndexSection:
             filepath = os.path.join(path, filename)
             if not os.path.isfile(filepath) or filename.startswith("."):
                 continue
-            entries.append(FileEntry.from_path(filepath, section_metadata["entries"].get(filename)))
-        return cls(section_metadata.get("unknown", 0), section_metadata["name"], entries)
+            entries.append(IndexFileEntry.from_path(filepath, section_metadata["entries"].get(filename)))
+        return cls(section_metadata["name"], entries)
 
 
 class AssetIndex:
@@ -229,20 +233,18 @@ class AssetIndex:
     def __init__(self, sections=None):
         self.sections = sections or []
 
-    def write_to_file(self):
+    def write_to_file(self, file):
         # Serialize all sections
-        return self.INDEX_HEADER + b''.join(section.write_to_file() for section in self.sections)
+        file.write(self.INDEX_HEADER)
+        for section in self.sections:
+            section.write_to_file(file)
 
     @classmethod
-    def read_from_file(cls, file_path):
-        with open(file_path, 'rb') as f:
-            data = f.read()
-
+    def read_from_file(cls, file):
         sections = []
-        index = len(cls.INDEX_HEADER)  # Skip the first 8 bytes (header)
-        while index < len(data):
-            section, index = IndexSection.read_from_file(data, index)
-            sections.append(section)
+        f.seek(len(cls.INDEX_HEADER))  # Skip the first 8 bytes (header)
+        while file.peek(4):
+            sections.append(IndexSection.read_from_file(file))
 
         return cls(sections=sections)
     
@@ -290,8 +292,6 @@ class AssetData:
                         entries_metadata[entry.filename]["is_compressed"] = False
                     if entry.is_ghost_file():
                         entries_metadata[entry.filename]["is_ghost_file"] = True
-                    if entry.flags():
-                        entries_metadata[entry.filename]["flags"] = entry.flags()
 
                     # TODO: calculate the offset as needed when writing the data file
                     entries_metadata[entry.filename]["offset"] = entry.offset()
@@ -300,8 +300,6 @@ class AssetData:
                     'name': section.extracted_dir_name(),
                     'entries': entries_metadata
                 }
-                if section.unknown:
-                    section_item["unknown"] = section.unknown
                 sections_metadata.append(section_item)
 
         # Save metadata to JSON
@@ -337,7 +335,7 @@ class AssetData:
                     input_file_path = os.path.join(section_dir, entry.filename)
 
                     if entry.is_compressed():
-                        temp_dat_path = FileEntry.compress_file(input_file_path)
+                        temp_dat_path = IndexFileEntry.compressed_file(input_file_path)
                         with open(temp_dat_path, 'rb') as temp_file:
                             packed_data = temp_file.read()
                         #os.remove(temp_dat_path)
@@ -377,13 +375,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "unpack":
-        asset_index = AssetIndex.read_from_file(args.index_file)
+        with open(args.index_file, "rb") as f:
+            asset_index = AssetIndex.read_from_file(f)
         asset_data = AssetData(asset_index, args.data_file)
         asset_data.extract_files(args.output_dir, only_section=args.section)
+        print("Unpacking complete!")
     elif args.command == "pack":
         asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file)
         with open(args.index_file, 'wb') as f:
-            f.write(asset_data.asset_index.write_to_file())
+            asset_data.asset_index.write_to_file(f)
         asset_data.pack_files(args.asset_dir)
+        print("Packing complete!")
     else:
         raise argparse.ArgumentError("Unknown command!")
