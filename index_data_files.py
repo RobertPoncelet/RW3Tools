@@ -15,7 +15,7 @@ def byte_pad_string(string):
 
 
 def to_compressed_path(path):
-    return os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.dat")
+    return os.path.join(os.path.dirname(path), ".compressed", f"{os.path.basename(path)}.rnc")
 
 
 def compressed(path):
@@ -32,6 +32,8 @@ def compressed(path):
 
 
 class IndexFileEntry:
+    exclude_list = None
+
     def __init__(self, filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file):
         self.filename = filename
         self._offset = offset
@@ -133,27 +135,47 @@ class IndexFileEntry:
         filename = entry_data[12:].decode('ascii').rstrip('\x00')
 
         return cls(filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file)
-
+    
     @classmethod
-    def from_path(cls, path, entry_metadata):
-        assert os.path.isfile(path)
-        filename = os.path.basename(path)
-        assert not filename.startswith(".")
+    def should_compress(cls, path):
+        if cls.exclude_list == None:
+            exclude_list_path = os.path.join(os.path.dirname(path), "..", "Graphics", "noncomp.txt")
+            print(exclude_list_path)
+            if os.path.isfile(exclude_list_path):
+                with open(exclude_list_path) as f:
+                    cls.exclude_list = {s.strip() for s in f.readlines()}
+            else:
+                cls.exclude_list = set()
 
+        asset_name = os.path.splitext(os.path.basename(path))[0]
+        if asset_name in cls.exclude_list:
+            return False
+        
         uncompressed_size = os.path.getsize(path)
         try:
             compressed_size = os.path.getsize(compressed(path))
         except subprocess.CalledProcessError:
-            print(f"Failed to compress {filename}")
-            compressed_size = uncompressed_size
-        should_compress = compressed_size < uncompressed_size
-        ghost_file = (entry_metadata or {}).get("is_ghost_file", False)
+            print(f"Failed to compress {os.path.basename(path)}")
+            return False
+
+        return compressed_size < uncompressed_size
+
+    @classmethod
+    def from_path(cls, path):
+        assert os.path.isfile(path)
+        filename = os.path.basename(path)
+        assert not filename.startswith(".")
+
+        should_compress = cls.should_compress(path)
+        uncompressed_size = os.path.getsize(path)
+        compressed_size = os.path.getsize(compressed(path)) if should_compress else uncompressed_size
+
         return IndexFileEntry(filename,
                               None,  # The offset is calculated later
-                              uncompressed_size=os.path.getsize(path),
+                              uncompressed_size=uncompressed_size,
                               compressed_size=compressed_size,
                               is_compressed=should_compress,
-                              is_ghost_file=ghost_file)
+                              is_ghost_file=False)
 
 
 class IndexSection:
@@ -229,7 +251,7 @@ class IndexSection:
             filepath = os.path.join(path, filename)
             if not os.path.isfile(filepath) or filename.startswith("."):
                 continue
-            entries.append(IndexFileEntry.from_path(filepath, section_metadata["entries"].get(filename)))
+            entries.append(IndexFileEntry.from_path(filepath))
         return cls(section_metadata["name"], entries)
 
 
@@ -273,7 +295,7 @@ class AssetData:
         self.asset_index = asset_index
         self.data_file_path = data_file_path
 
-    def extract_files(self, output_dir, only_section=None, metadata_only=False):
+    def extract_files(self, output_dir, only_section=None):
         os.makedirs(output_dir, exist_ok=True)
 
         sections_metadata = []
@@ -308,9 +330,8 @@ class AssetData:
             json.dump(sections_metadata, json_file, indent=4)
 
         # Run extraction tasks in parallel using multiprocessing
-        if not metadata_only:
-            with Pool(cpu_count()) as pool:
-                pool.map(self._extract_file, tasks)
+        with Pool(cpu_count()) as pool:
+            pool.map(self._extract_file, tasks)
 
     def _extract_file(self, args):
         data_file_path, output_file_path, entry = args
