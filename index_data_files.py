@@ -71,15 +71,13 @@ class IndexFileEntry:
     def write_packed_asset_to_data_file(self, packed_data, data_file, current_offset):
         # This is mainly so we can update our offset
         self._offset = current_offset
-        print(current_offset)
         assert len(packed_data) == self.compressed_file_size()
         data_file.write(packed_data)
-        current_offset = self.offset() + self.compressed_file_size()
-        #CHUNK_SIZE = 0x800
-        #next_boundary = ((self.offset() + CHUNK_SIZE -1) // CHUNK_SIZE) * CHUNK_SIZE
-        #data_file.write(b"\x00" * (next_boundary - current_offset))
-        #print(current_offset, next_boundary)
-        return current_offset# next_boundary
+        CHUNK_SIZE = 4  # Use 0x80 to get the original 2KB optimised for CD reading
+        padding_length = (CHUNK_SIZE - (len(packed_data) % CHUNK_SIZE)) % CHUNK_SIZE
+        data_file.write(b'\x00' * padding_length)
+        current_offset = self.offset() + self.compressed_file_size() + padding_length
+        return current_offset
 
     def is_ghost_file(self):
         return self._is_ghost_file
@@ -146,6 +144,7 @@ class IndexFileEntry:
         try:
             compressed_size = os.path.getsize(compressed(path))
         except subprocess.CalledProcessError:
+            print(f"Failed to compress {filename}")
             compressed_size = uncompressed_size
         should_compress = compressed_size < uncompressed_size
         ghost_file = (entry_metadata or {}).get("is_ghost_file", False)
@@ -329,11 +328,11 @@ class AssetData:
         with open(data_file_path, "rb") as data_file:
             data_file.seek(entry.offset())
             with open(directly_extracted_path, "wb") as out_file:
-                out_file.write(data_file.read(entry.uncompressed_file_size()))
+                out_file.write(data_file.read(entry.compressed_file_size()))
         print(f'Extracted {entry.filename} to {output_file_path}.')
 
     def pack_files(self, asset_dir):
-        with open(self.data_file_path, 'rb+') as data_file:
+        with open(self.data_file_path, 'wb') as data_file:
             current_offset = 0
             for section in self.asset_index.sections:
                 section_dir = os.path.join(asset_dir, section.extracted_dir_name())
