@@ -42,11 +42,18 @@ class Mesh:
         with open(filepath, 'w') as f:
             f.write(f"# Exported OBJ file from Mesh class\n")
 
+            # Write reference to the material file (.mtl)
+            mtl_filepath = filepath.replace(".obj", ".mtl")
+            f.write(f"mtllib {os.path.basename(mtl_filepath)}\n")
+
             # Index counters for vertices, texture coords, and normals (OBJ indices are 1-based)
             vertex_offset = 1
             
             for submesh in self._submeshes:
-                material, positions, normals, colours, uvs, indices = submesh
+                material, spec_map, positions, normals, colours, uvs, indices = submesh
+
+                # Use the material from the material library
+                f.write(f"\nusemtl {material}\n")
                 
                 # Write a comment with the material name
                 f.write(f"\n# Material: {material}\n")
@@ -71,10 +78,32 @@ class Mesh:
                             f"{v2+vertex_offset}/{v2+vertex_offset}/{v2+vertex_offset} "
                             f"{v3+vertex_offset}/{v3+vertex_offset}/{v3+vertex_offset}\n")
 
-                # Increase vertex offset for the next submesh
-                #vertex_offset += len(positions)
-
         print(f"Mesh successfully exported to {filepath}")
+
+        # Write the .mtl file
+        self.export_mtl(mtl_filepath)
+
+    def export_mtl(self, filepath):
+        with open(filepath, 'w') as f:
+            f.write(f"# Exported MTL file from Mesh class\n")
+            
+            for submesh in self._submeshes:
+                material, spec_map, positions, normals, colours, uvs, indices = submesh
+                
+                # Write material properties (for now, we assume simple properties)
+                f.write(f"\nnewmtl {material}\n")
+                f.write("Ka 1.000 1.000 1.000\n")  # Ambient color (white)
+                f.write("Kd 1.000 1.000 1.000\n")  # Diffuse color (white)
+                f.write("Ks 0.000 0.000 0.000\n")  # Specular color (black)
+                f.write("d 1.0\n")  # Transparency (opaque)
+                f.write("illum 2\n")  # Illumination model (default)
+                f.write(f"map_Kd {material}.tga\n")  # Diffuse texture
+
+                # Check if we have a specular map (assuming spec_map exists in your material)
+                if spec_map:
+                    f.write(f"map_Ks {spec_map}.tga\n")  # Specular map
+        
+        print(f"Materials successfully exported to {filepath}")
 
     @classmethod
     def read_from_rwm_file(cls, f):
@@ -124,13 +153,14 @@ class Mesh:
                 positions.append(read_floats(f, 3))
                 normals.append(read_floats(f, 3))
                 colours.append((c / 255. for c in read_uchars(f, 4)))
-                uvs.append(read_floats(f, 2))
+                uv = read_floats(f, 2)
+                uvs.append((uv[0], -uv[1]))  # Flip V
 
             assert read_uints(f, 2) == (1,0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
             indices = read_ushorts(f, num_tris*3)
-            submeshes.append((material, positions, normals, colours, uvs, indices))
+            submeshes.append((material, spec_map, positions, normals, colours, uvs, indices))
 
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
