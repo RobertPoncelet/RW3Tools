@@ -14,6 +14,23 @@ def byte_pad_string(string):
     return string_bytes + b'\x00' * padding_length
 
 
+def to_compressed_path(path):
+    return os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.dat")
+
+
+def compressed(path):
+    compressed_path = to_compressed_path(path)
+    if os.path.isfile(compressed_path) and os.path.getmtime(path) < os.path.getmtime(compressed_path):
+        return compressed_path
+
+    print(f"Compressing {path}...")
+    command = [
+        'rnc_lib.exe', 'p', path, compressed_path, '-m=1'
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL)
+    return compressed_path
+
+
 class IndexFileEntry:
     def __init__(self, filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file):
         self.filename = filename
@@ -22,11 +39,6 @@ class IndexFileEntry:
         self._compressed_size = compressed_size
         self._is_compressed = is_compressed
         self._is_ghost_file = is_ghost_file
-        self._cached_compressed_path = None  # TODO: remove this
-
-    def __del__(self):
-        if self._cached_compressed_path:
-            pass#os.remove(self._cached_compressed_path)
     
     def entry_size(self):
         return 16 + len(byte_pad_string(self.filename))
@@ -37,7 +49,6 @@ class IndexFileEntry:
         return self._offset
     
     def update_from_data_file(self, data_file):
-        print(f"updating {self.filename} from {data_file}")
         # For some reason, certain "ghost" files are marked as size 0 in the index, even though
         # they exist in the data file. In these cases, we need to check the data file itself.
         if not self.is_ghost_file():
@@ -56,6 +67,19 @@ class IndexFileEntry:
             assert not self.is_compressed()
             # Fuck knows
             self._compressed_size = self._uncompressed_size = 0x800
+
+    def write_packed_asset_to_data_file(self, packed_data, data_file, current_offset):
+        # This is mainly so we can update our offset
+        self._offset = current_offset
+        print(current_offset)
+        assert len(packed_data) == self.compressed_file_size()
+        data_file.write(packed_data)
+        current_offset = self.offset() + self.compressed_file_size()
+        #CHUNK_SIZE = 0x800
+        #next_boundary = ((self.offset() + CHUNK_SIZE -1) // CHUNK_SIZE) * CHUNK_SIZE
+        #data_file.write(b"\x00" * (next_boundary - current_offset))
+        #print(current_offset, next_boundary)
+        return current_offset# next_boundary
 
     def is_ghost_file(self):
         return self._is_ghost_file
@@ -112,42 +136,25 @@ class IndexFileEntry:
 
         return cls(filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file)
 
-    @staticmethod
-    def compressed_file(path):
-        temp_dat_path = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.dat")
-        if os.path.isfile(temp_dat_path) and os.path.getmtime(path) < os.path.getmtime(temp_dat_path):
-            return temp_dat_path
-
-        print(f"Compressing {path}...")
-        command = [
-            'rnc_lib.exe', 'p', path, temp_dat_path, '-m=1'
-        ]
-        subprocess.check_call(command, stdout=subprocess.DEVNULL)
-        return temp_dat_path
-
     @classmethod
     def from_path(cls, path, entry_metadata):
         assert os.path.isfile(path)
         filename = os.path.basename(path)
         assert not filename.startswith(".")
 
-        compressed = entry_metadata.get("is_compressed", True)
-        if compressed:
-            compressed_path = cls.compressed_file(path)
-            compressed_size = os.path.getsize(compressed_path)
-        else:
-            compressed_size = os.path.getsize(path)
-
-        entry = IndexFileEntry(filename,
-                               offset=entry_metadata["offset"],  # TODO: calculate the offset as needed when writing the data file
-                               uncompressed_size=os.path.getsize(path),
-                               compressed_size=compressed_size,
-                               is_compressed=compressed,
-                               is_ghost_file=entry_metadata.get("is_ghost_file", False))
-        if compressed:
-            entry._cached_compressed_path = compressed_path
-
-        return entry
+        uncompressed_size = os.path.getsize(path)
+        try:
+            compressed_size = os.path.getsize(compressed(path))
+        except subprocess.CalledProcessError:
+            compressed_size = uncompressed_size
+        should_compress = compressed_size < uncompressed_size
+        ghost_file = (entry_metadata or {}).get("is_ghost_file", False)
+        return IndexFileEntry(filename,
+                              None,  # The offset is calculated later
+                              uncompressed_size=os.path.getsize(path),
+                              compressed_size=compressed_size,
+                              is_compressed=should_compress,
+                              is_ghost_file=ghost_file)
 
 
 class IndexSection:
@@ -263,9 +270,9 @@ class AssetIndex:
 
 
 class AssetData:
-    def __init__(self, asset_index: AssetIndex, dat_file_path: str):
+    def __init__(self, asset_index: AssetIndex, data_file_path: str):
         self.asset_index = asset_index
-        self.dat_file_path = dat_file_path
+        self.data_file_path = data_file_path
 
     def extract_files(self, output_dir, only_section=None, metadata_only=False):
         os.makedirs(output_dir, exist_ok=True)
@@ -273,7 +280,7 @@ class AssetData:
         sections_metadata = []
         tasks = []
 
-        with open(self.dat_file_path, "rb") as data_file:
+        with open(self.data_file_path, "rb") as data_file:
             for section in self.asset_index.sections:
                 section_dir = os.path.join(output_dir, section.extracted_dir_name())
                 os.makedirs(section_dir, exist_ok=True)
@@ -285,16 +292,11 @@ class AssetData:
                     output_file_path = os.path.join(section_dir, entry.filename)
 
                     if section.extracted_dir_name() == only_section or not only_section:
-                        tasks.append((self.dat_file_path, output_file_path, entry))
+                        tasks.append((self.data_file_path, output_file_path, entry))
 
                     # Collect metadata needed to reconstruct the idx file
-                    if not entry.is_compressed():
-                        entries_metadata[entry.filename]["is_compressed"] = False
                     if entry.is_ghost_file():
                         entries_metadata[entry.filename]["is_ghost_file"] = True
-
-                    # TODO: calculate the offset as needed when writing the data file
-                    entries_metadata[entry.filename]["offset"] = entry.offset()
                 
                 section_item = {
                     'name': section.extracted_dir_name(),
@@ -312,47 +314,47 @@ class AssetData:
                 pool.map(self._extract_file, tasks)
 
     def _extract_file(self, args):
-        dat_file_path, output_file_path, entry = args
+        data_file_path, output_file_path, entry = args
         if entry.is_compressed():
+            print(f"Decompressing {entry.filename}...")
             command = [
-                'rnc_lib.exe', 'u', dat_file_path, output_file_path, f'-i={entry.offset():X}'
+                'rnc_lib.exe', 'u', data_file_path, output_file_path, f'-i={entry.offset():X}'
             ]
             subprocess.check_call(command, stdout=subprocess.DEVNULL)
+            # Extract the file verbatim for caching
+            directly_extracted_path = to_compressed_path(output_file_path)
         else:
-            print(entry.filename, "is not compressed.")
-            with open(dat_file_path, "rb") as dat_file:
-                dat_file.seek(entry.offset())
-                with open(output_file_path, "wb") as out_file:
-                    out_file.write(dat_file.read(entry.uncompressed_file_size()))
-        print(f'Extracted {os.path.basename(output_file_path)} to {output_file_path}.')
+            directly_extracted_path = output_file_path
+
+        with open(data_file_path, "rb") as data_file:
+            data_file.seek(entry.offset())
+            with open(directly_extracted_path, "wb") as out_file:
+                out_file.write(data_file.read(entry.uncompressed_file_size()))
+        print(f'Extracted {entry.filename} to {output_file_path}.')
 
     def pack_files(self, asset_dir):
-        for section in self.asset_index.sections:
-            section_dir = os.path.join(asset_dir, section.extracted_dir_name())
+        with open(self.data_file_path, 'rb+') as data_file:
+            current_offset = 0
+            for section in self.asset_index.sections:
+                section_dir = os.path.join(asset_dir, section.extracted_dir_name())
 
-            with open(self.dat_file_path, 'rb+') as dat_file:
                 for entry in section.entries:
                     input_file_path = os.path.join(section_dir, entry.filename)
 
                     if entry.is_compressed():
-                        temp_dat_path = IndexFileEntry.compressed_file(input_file_path)
-                        with open(temp_dat_path, 'rb') as temp_file:
-                            packed_data = temp_file.read()
-                        #os.remove(temp_dat_path)
-                        entry._cached_compressed_path = temp_dat_path
-                    else:
-                        with open(input_file_path, 'rb') as temp_file:
-                            packed_data = temp_file.read()
+                        input_file_path = compressed(input_file_path)
 
-                    dat_file.seek(entry.offset())
-                    dat_file.write(packed_data)
+                    with open(input_file_path, 'rb') as f:
+                        packed_data = f.read()
 
-                    print(f'Packed {entry.filename} to {self.dat_file_path} at offset {entry.offset():X}.')
+                    current_offset = entry.write_packed_asset_to_data_file(packed_data, data_file, current_offset)
+
+                    print(f'Packed {entry.filename} to {self.data_file_path} at offset {entry.offset():X}.')
 
     @classmethod
-    def from_asset_dir(cls, asset_dir, dat_file_path):
+    def from_asset_dir(cls, asset_dir, data_file_path):
         asset_index = AssetIndex.from_asset_dir(asset_dir)
-        return cls(asset_index, dat_file_path)
+        return cls(asset_index, data_file_path)
 
 
 if __name__ == "__main__":
@@ -382,9 +384,9 @@ if __name__ == "__main__":
         print("Unpacking complete!")
     elif args.command == "pack":
         asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file)
+        asset_data.pack_files(args.asset_dir)
         with open(args.index_file, 'wb') as f:
             asset_data.asset_index.write_to_file(f)
-        asset_data.pack_files(args.asset_dir)
         print("Packing complete!")
     else:
         raise argparse.ArgumentError("Unknown command!")
