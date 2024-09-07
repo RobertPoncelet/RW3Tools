@@ -1,4 +1,5 @@
 import sys, os, struct
+from functools import reduce
 
 
 def read_string(file):
@@ -39,18 +40,44 @@ def _read_multiple(file, format, num):
     return tuple(_read_single(file, format) for _ in range(num))
 
 
+def write_string(file, string):
+    write_uint(file, len(string))
+    file.write(string.encode("ascii"))
+
+def write_uint(file, value):
+    _write_single(file, "I", value)
+
+def write_uints(file, values):
+    _write_multi(file, "I", values)
+
+def write_float(file, value):
+    _write_single(file, "f", value)
+
+def write_floats(file, values):
+    _write_multi(file, "f", values)
+
+def write_ushorts(file, values):
+    _write_multi(file, "H", values)
+
+def write_uchars(file, values):
+    _write_multi(file, "B", values)
+
+def _write_single(file, format, value):
+    file.write(struct.pack("<" + format, value))
+
+def _write_multi(file, format, values):
+    file.write(struct.pack("<" + (format * len(values)), values))
+
+
 class Mesh:
     def __init__(self, submeshes):
         self._submeshes = submeshes
 
-    def export_to_obj(self, obj_file, mtl_file, mtl_filepath):
+    def write_to_obj(self, obj_file, mtl_file, mtl_filepath):
         obj_file.write(f"# Exported from RW:ED\n")
 
         # Write reference to the material file (.mtl)
         obj_file.write(f"mtllib {os.path.basename(mtl_filepath)}\n")
-
-        # Index counters for vertices, texture coords, and normals (OBJ indices are 1-based)
-        vertex_offset = 1
         
         for submesh in self._submeshes:
             material, spec_map, positions, normals, colours, uvs, indices = submesh
@@ -77,16 +104,16 @@ class Mesh:
             for i in range(0, len(indices), 3):
                 # The face format in OBJ: f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3
                 v1, v2, v3 = indices[i], indices[i+1], indices[i+2]
-                obj_file.write(f"f {v1+vertex_offset}/{v1+vertex_offset}/{v1+vertex_offset} "
-                        f"{v2+vertex_offset}/{v2+vertex_offset}/{v2+vertex_offset} "
-                        f"{v3+vertex_offset}/{v3+vertex_offset}/{v3+vertex_offset}\n")
+                obj_file.write(f"f {v1+1}/{v1+1}/{v1+1} "
+                        f"{v2+1}/{v2+1}/{v2+1} "
+                        f"{v3+1}/{v3+1}/{v3+1}\n")
 
         print(f"Mesh successfully exported")
 
         # Write the .mtl file
-        self.export_mtl(mtl_file)
+        self.write_mtl(mtl_file)
 
-    def export_mtl(self, f):
+    def write_mtl(self, f):
         f.write(f"# Exported from RW:ED\n")
         
         for submesh in self._submeshes:
@@ -107,9 +134,50 @@ class Mesh:
         
         print(f"Materials successfully exported")
 
-    def export_to_rwm(f):
+    def write_to_rwm(self, f):
         f.write(b"MSH\x01")
+        write_uint(f, 0)  # num_mysteries
+        write_uint(f, len(self._submeshes))
+        all_positions = reduce(lambda a, b: a.extend(b), [submesh[2] for submesh in self._submeshes])
+        all_indices = reduce(lambda a, b: a.extend(b), [submesh[6] for submesh in self._submeshes])
+        write_uint(f, len(all_positions))
+        write_uint(f, len(all_indices) / 3)
+        write_uint(f, 1)  # ???
+        minx = min(v[0] for v in all_positions)
+        miny = min(v[1] for v in all_positions)
+        minz = min(v[2] for v in all_positions)
+        maxx = max(v[0] for v in all_positions)
+        maxy = max(v[1] for v in all_positions)
+        maxz = max(v[2] for v in all_positions)
+        write_floats(f, (minx, miny, minz))
+        write_floats(f, (maxx, maxy, maxz))
+        write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
+        write_float(f, 30.)  # Mass?
 
+        # TODO: write mysteries here
+
+        for submesh in self._submeshes:
+            material = submesh[0]
+            spec_map = submesh[1]
+            write_string(f, material)
+            write_string(f, spec_map or "")
+            f.write(b"\xcc\xcc\xcc\xff")
+            write_float(f, 30.)  # ???
+            write_uint(f, 0)  # Also dunno, flags?
+        
+        for submesh in self._submeshes:
+            write_uint(f, 0)
+            num_verts = len(submesh[2])  # Positions
+            write_uint(f, num_verts)
+            for i in range(num_verts):
+                write_floats(f, submesh[2][i])
+                write_floats(f, submesh[3][i])
+                write_uchars(f, (int(c*255) for c in submesh[4][i]))
+                uv = submesh[5][i]
+                write_floats(f, (uv[0], -uv[1]))  # Flip V
+            write_uints(f, (1, 0))
+            write_uint(f, len(submesh[6])/3)
+            write_ushorts(f, submesh[6])
 
     @classmethod
     def read_from_rwm_file(cls, f):
@@ -119,12 +187,12 @@ class Mesh:
         num_materials = read_uint(f)
         print(f"Number of materials: {num_materials}")
         print(f"Total number of verts: {read_uint(f)}")
-        print(f"Another number: {read_uint(f)}")
+        print(f"Total number of triangles: {read_uint(f)}")
         print(f"A low number, but NOT the number of materials: {read_uint(f)}")
-        print(f"A point:                 {read_floats(f, 3)}")
-        print(f"Another point:           {read_floats(f, 3)}")
-        print(f"Another point (origin?): {read_floats(f, 3)}")
-        print(f"Something else: {read_float(f)}")
+        print(f"Bounding box min: {read_floats(f, 3)}")
+        print(f"Bounding box max: {read_floats(f, 3)}")
+        print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
+        print(f"Something else (mass?): {read_float(f)}")
 
         mysteries = []
         for _ in range(num_mysteries):
@@ -164,7 +232,7 @@ class Mesh:
                 uv = read_floats(f, 2)
                 uvs.append((uv[0], -uv[1]))  # Flip V
 
-            assert read_uints(f, 2) == (1,0)
+            assert read_uints(f, 2) == (1, 0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
             indices = read_ushorts(f, num_tris*3)
@@ -223,7 +291,7 @@ class Mesh:
             elif words[0] == "f":
                 assert len(words) == 4 and all(v.split("/")[0] == v.split("/")[1] == v.split("/")[2] for v in words[1:])
                 for v in words[1:]:
-                    current_indices.append(int(v.split("/")[0]))
+                    current_indices.append(int(v.split("/")[0])-1)
 
             else:
                 thing = tuple(float(word) for word in words[1:])
@@ -246,8 +314,8 @@ if __name__ == "__main__":
             m = Mesh.read_from_rwm_file(obj_file)
             with open(basename + ".obj", 'w') as f1:
                 with open(basename + ".mtl", 'w') as f2:
-                    m.export_to_obj(f1, f2, basename + ".mtl")
+                    m.write_to_obj(f1, f2, basename + ".mtl")
         else:
             m = Mesh.read_from_obj_file(obj_file)
             with open(basename + ".rwm", 'wb') as obj_file:
-                m.export_to_rwm(obj_file)
+                m.write_to_rwm(obj_file)
