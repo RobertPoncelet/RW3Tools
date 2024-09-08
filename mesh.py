@@ -254,26 +254,13 @@ class Mesh:
         current_normals = []
         current_colours = []
         current_uvs = []
-        current_indices = []
+        current_indices = []            
 
-        def add_current_submesh():
-            assert len(current_positions) == len(current_normals) == len(current_uvs)
-            current_colours = [(1., 1., 1., 1.) for _ in current_positions]
-            submeshes.append((current_mat,
-                              current_spec_map,
-                              current_positions,
-                              current_normals,
-                              current_colours,
-                              current_uvs,
-                              current_indices))
-            submeshes = []
-            current_mat = None
-            current_spec_map = None
-            current_positions = []
-            current_normals = []
-            current_colours = []
-            current_uvs = []
-            current_indices = []
+        vertex_dict = {
+            "v": current_positions,
+            "vn": current_normals,
+            "vt": current_uvs
+        }
 
         for line in f.readlines():
             words = line.split()
@@ -285,37 +272,69 @@ class Mesh:
 
             elif words[0] == "usemtl":
                 if current_mat:
-                    add_current_submesh()
+                    assert len(current_positions) == len(current_normals) == len(current_uvs)
+                    current_colours = [(1., 1., 1., 1.) for _ in current_positions]
+                    submeshes.append((current_mat,
+                                    current_spec_map,
+                                    current_positions,
+                                    current_normals,
+                                    current_colours,
+                                    current_uvs,
+                                    current_indices))
+                    submeshes = []
+                    current_mat = None
+                    current_spec_map = None
+                    current_positions = []
+                    current_normals = []
+                    current_colours = []
+                    current_uvs = []
+                    current_indices = []
                 current_mat = words[1]
 
             elif words[0] == "f":
-                assert len(words) == 4 and all(v.split("/")[0] == v.split("/")[1] == v.split("/")[2] for v in words[1:])
+                assert len(words) == 4 #and all(v.split("/")[0] == v.split("/")[1] == v.split("/")[2] for v in words[1:])
                 for v in words[1:]:
                     current_indices.append(int(v.split("/")[0])-1)
 
-            else:
+            elif words[0] in vertex_dict:
                 thing = tuple(float(word) for word in words[1:])
-                {
-                    "v": current_positions,
-                    "vn": current_normals,
-                    "vt": current_uvs
-                }[words[0]].append(thing)
+                vertex_dict[words[0]].append(thing)
 
-        add_current_submesh()
+            else:
+                print("Not handling line:", line)
+
+        assert len(current_positions) == len(current_normals) == len(current_uvs)
+        current_colours = [(1., 1., 1., 1.) for _ in current_positions]
+        submeshes.append((current_mat,
+                        current_spec_map,
+                        current_positions,
+                        current_normals,
+                        current_colours,
+                        current_uvs,
+                        current_indices))
+        submeshes = []
+        current_mat = None
+        current_spec_map = None
+        current_positions = []
+        current_normals = []
+        current_colours = []
+        current_uvs = []
+        current_indices = []
         return Mesh(submeshes)
 
 
 if __name__ == "__main__":
     in_path = sys.argv[1]
-    print(f"Reading {in_path}".center(80, "="))
+    out_path = sys.argv[2]
+    print(f"Converting {in_path} => {out_path}".center(80, "="))
     basename, extension = os.path.splitext(in_path)
-    with open(in_path, "rb" if extension == ".rwm" else "r") as obj_file:
+    with open(in_path, "rb" if extension == ".rwm" else "r") as in_file:
         if extension == ".rwm":
-            m = Mesh.read_from_rwm_file(obj_file)
-            with open(basename + ".obj", 'w') as f1:
-                with open(basename + ".mtl", 'w') as f2:
-                    m.write_to_obj(f1, f2, basename + ".mtl")
+            m = Mesh.read_from_rwm_file(in_file)
+            with open(out_path, "w") as f1:
+                with open(os.path.splitext(out_path)[0] + ".mtl", "w") as f2:
+                    m.write_to_obj(f1, f2, os.path.splitext(out_path)[0] + ".mtl")
         else:
-            m = Mesh.read_from_obj_file(obj_file)
-            with open(basename + ".rwm", 'wb') as obj_file:
-                m.write_to_rwm(obj_file)
+            m = Mesh.read_from_obj_file(in_file)
+            with open(out_path, "wb" if extension == ".rwm" else "w") as out_file:
+                m.write_to_rwm(out_file)
