@@ -1,6 +1,6 @@
 import sys, os, struct
 from functools import reduce
-from pxr import Usd, UsdGeom, Gf
+from pxr import Usd, UsdGeom, Gf, Sdf
 
 
 def read_string(file):
@@ -156,6 +156,7 @@ class Mesh:
             print(f"Another number (flags?): {read_uint(f)}")
 
         submeshes = []
+        num_indices = 0
         for material in materials:  # Each material is a string
             positions = []
             normals = []
@@ -175,7 +176,8 @@ class Mesh:
             assert read_uints(f, 2) == (1, 0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
-            indices = read_ushorts(f, num_tris*3)
+            indices = [i - num_indices for i in read_ushorts(f, num_tris*3)]
+            num_indices += max(indices) + 1
             submeshes.append((material, spec_maps.get(material), positions, normals, colours, uvs, indices))
 
         print(f"\nFinished at {hex(f.tell())}")
@@ -204,23 +206,20 @@ class Mesh:
             points = [Gf.Vec3f(p[0], p[1], p[2]) for p in positions]
             mesh_prim.GetPointsAttr().Set(points)
             
-            # Set normals if available
-            if normals:
-                normals_gf = [Gf.Vec3f(n[0], n[1], n[2]) for n in normals]
-                mesh_prim.GetNormalsAttr().Set(normals_gf)
+            # Set normals
+            mesh_prim.GetNormalsAttr().Set([Gf.Vec3f(n[0], n[1], n[2]) for n in normals])
             
-            # Set UVs if available
-            if uvs:
-                st_values = [Gf.Vec2f(uv[0], uv[1]) for uv in uvs]
-                tex_coords_attr = mesh_prim.CreatePrimvar("st", UsdGeom.Primvar.TypeFloat2, interpolation="vertex")
-                tex_coords_attr.Set(st_values)
-            
-            # Set face vertex indices
-            mesh_prim.GetFaceVertexIndicesAttr().Set(indices)
-            
+            # # Set UVs
+            tex_coords_attr = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
+                                                                           Sdf.ValueTypeNames.TexCoord2fArray,
+                                                                           interpolation="vertex")
+            tex_coords_attr.Set([Gf.Vec2f(uv[0], uv[1]) for uv in uvs])
+
             # Create face vertex counts (all triangles, so each face has 3 vertices)
-            face_vertex_counts = [3] * (len(indices) // 3)
-            mesh_prim.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_prim.CreateFaceVertexCountsAttr([3] * (len(indices) // 3))
+    
+            # Set face vertex indices
+            mesh_prim.CreateFaceVertexIndicesAttr(indices)
             
         # Save the stage
         stage.GetRootLayer().Save()
