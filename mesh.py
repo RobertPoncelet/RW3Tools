@@ -1,6 +1,6 @@
 import sys, os, struct
 from functools import reduce
-from pxr import Usd, UsdGeom, Gf, Sdf
+from pxr import Usd, UsdGeom, UsdShade, Gf, Sdf
 
 
 def read_string(file):
@@ -193,74 +193,115 @@ class Mesh:
         
         # Create the root Xform (transform) node for the mesh
         root_prim = UsdGeom.Xform.Define(stage, "/Root")
+
+        # Create a single mesh node for all submeshes
+        mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
         
-        # Loop through submeshes and export them as individual meshes
+        all_positions = []
+        all_normals = []
+        all_uvs = []
+        all_indices = []
+        face_vertex_counts = []
+        face_sets = {}
+
+        vertex_offset = 0
+
+        # Iterate through submeshes to gather combined geometry data
         for submesh_idx, submesh in enumerate(self._submeshes):
             material, spec_map, positions, normals, colours, uvs, indices = submesh
-            
-            # Create a mesh node under /Root for each submesh
-            mesh_path = f"/Root/Submesh{submesh_idx}"
-            mesh_prim = UsdGeom.Mesh.Define(stage, mesh_path)
-            
-            # Set vertex positions
-            points = [Gf.Vec3f(p[0], p[1], p[2]) for p in positions]
-            mesh_prim.GetPointsAttr().Set(points)
-            
-            # Set normals
-            mesh_prim.GetNormalsAttr().Set([Gf.Vec3f(n[0], n[1], n[2]) for n in normals])
-            
-            # # Set UVs
-            tex_coords_attr = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
-                                                                           Sdf.ValueTypeNames.TexCoord2fArray,
-                                                                           interpolation="vertex")
-            tex_coords_attr.Set([Gf.Vec2f(uv[0], uv[1]) for uv in uvs])
 
-            # Create face vertex counts (all triangles, so each face has 3 vertices)
-            mesh_prim.CreateFaceVertexCountsAttr([3] * (len(indices) // 3))
-    
-            # Set face vertex indices
-            mesh_prim.CreateFaceVertexIndicesAttr(indices)
-            
+            # Add vertices, normals, uvs to combined arrays
+            all_positions.extend([Gf.Vec3f(p[0], p[1], p[2]) for p in positions])
+            all_normals.extend([Gf.Vec3f(n[0], n[1], n[2]) for n in normals])
+            all_uvs.extend([Gf.Vec2f(uv[0], uv[1]) for uv in uvs])
+
+            # Adjust indices to account for the vertex offset
+            adjusted_indices = [i + vertex_offset for i in indices]
+            all_indices.extend(adjusted_indices)
+
+            # Set face vertex counts (all triangles)
+            face_vertex_counts.extend([3] * (len(indices) // 3))
+
+            # Track faces for face sets (group faces by material)
+            if material not in face_sets:
+                face_sets[material] = []
+            face_sets[material].extend(range(len(face_vertex_counts) - len(indices) // 3, len(face_vertex_counts)))
+
+            # Update the vertex offset for the next submesh
+            vertex_offset += len(positions)
+
+        # Set vertex positions, normals, uvs, and face indices in the mesh
+        mesh_prim.GetPointsAttr().Set(all_positions)
+        mesh_prim.GetNormalsAttr().Set(all_normals)
+        mesh_prim.GetFaceVertexIndicesAttr().Set(all_indices)
+        mesh_prim.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+
+        # Set UVs (texture coordinates) in a Primvar
+        st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
+                                                                  Sdf.ValueTypeNames.TexCoord2fArray,
+                                                                  interpolation="vertex")
+        st_primvar.Set(all_uvs)
+
+        # Create face sets for each material
+        for material, face_indices in face_sets.items():
+            print(mesh_prim, material, "fuck", face_indices)
+            face_set = UsdGeom.Subset.CreateGeomSubset(mesh_prim, material, "fuck", face_indices)
+
+        # Export materials and bind to the mesh
+        self.export_usd_materials(stage, face_sets)
+
         # Save the stage
         stage.GetRootLayer().Save()
 
         print(f"Mesh successfully exported to USD: {filepath}")
 
-    @classmethod
+    def export_usd_materials(self, stage, face_sets):
+        for material_name, face_indices in face_sets.items():
+            # Create a Material node under /Root/Materials/
+            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{material_name}")
+
+            # Create a simple shader (you can extend this to support more complex material properties)
+            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{material_name}/PBRShader")
+            shader_prim.CreateIdAttr("UsdPreviewSurface")
+
+            # Set some default PBR values (this can be extended)
+            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.0, 1.0, 1.0))
+            shader_prim.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+            shader_prim.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+            # Bind shader to material
+            material_prim.CreateSurfaceOutput().ConnectToSource(shader_prim, "surface")
+
+            # Bind material to the mesh faces that use it
+            mesh_prim = stage.GetPrimAtPath("/Root/Mesh")
+            UsdShade.MaterialBindingAPI(mesh_prim).Bind(material_prim)
+
     def import_from_usd(self, filepath):
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
-        root_prim = stage.GetPrimAtPath("/Root")
+        mesh_prim = stage.GetPrimAtPath("/Root/Mesh")
+        mesh = UsdGeom.Mesh(mesh_prim)
+        
+        positions = mesh.GetPointsAttr().Get()
+        normals = mesh.GetNormalsAttr().Get()
+        indices = mesh.GetFaceVertexIndicesAttr().Get()
+        uvs = mesh.GetPrimvar("st").Get()
         
         submeshes = []
 
-        # Iterate over submesh nodes
-        for child in root_prim.GetChildren():
-            if not child.IsA(UsdGeom.Mesh):
-                continue  # Skip if it's not a mesh
-
-            mesh_prim = UsdGeom.Mesh(child)
+        # Handle materials and face sets
+        face_sets = mesh.GetFaceSets()
+        for face_set_name in face_sets:
+            material = face_set_name  # Use the face set name as the material
+            face_set_indices = face_sets[face_set_name].Get()
             
-            # Read vertex positions
-            positions_attr = mesh_prim.GetPointsAttr()
-            positions = positions_attr.Get()
-
-            # Read normals
-            normals_attr = mesh_prim.GetNormalsAttr()
-            normals = normals_attr.Get() if normals_attr else []
-
-            # Read UVs
-            tex_coords_primvar = mesh_prim.GetPrimvar("st")
-            uvs = tex_coords_primvar.Get() if tex_coords_primvar else []
-
-            # Read face indices
-            indices_attr = mesh_prim.GetFaceVertexIndicesAttr()
-            indices = indices_attr.Get()
-
-            # For simplicity, let's assume no per-face materials for now
-            material = "DefaultMaterial"
-
-            submeshes.append((material, positions, normals, [], uvs, indices))
+            # Extract the submesh using indices from the face set
+            submesh_indices = [indices[i] for i in face_set_indices]
+            submesh_positions = [positions[i] for i in submesh_indices]
+            submesh_normals = [normals[i] for i in submesh_indices]
+            submesh_uvs = [uvs[i] for i in submesh_indices]
+            
+            submeshes.append((material, submesh_positions, submesh_normals, [], submesh_uvs, submesh_indices))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(submeshes)
