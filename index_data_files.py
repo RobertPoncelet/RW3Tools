@@ -295,7 +295,7 @@ class AssetData:
         self.asset_index = asset_index
         self.data_file_path = data_file_path
 
-    def extract_files(self, output_dir, only_section=None):
+    def extract_files(self, output_dir, only_section=None, only_filename=None):
         os.makedirs(output_dir, exist_ok=True)
 
         sections_metadata = []
@@ -312,7 +312,9 @@ class AssetData:
                     entry.update_from_data_file(data_file)
                     output_file_path = os.path.join(section_dir, entry.filename)
 
-                    if section.extracted_dir_name() == only_section or not only_section:
+                    do_section = section.extracted_dir_name() == only_section or not only_section
+                    do_file = entry.filename == only_filename or not only_filename
+                    if do_section and do_file:
                         tasks.append((self.data_file_path, output_file_path, entry))
 
                     # Collect metadata needed to reconstruct the idx file
@@ -387,6 +389,7 @@ if __name__ == "__main__":
     unpack_parser.add_argument("data_file", help="Path to the data file (.dat)")
     unpack_parser.add_argument("output_dir", help="Directory to extract assets into")
     unpack_parser.add_argument("--section", required=False)
+    unpack_parser.add_argument("--filename", required=False)
 
     # Pack command
     pack_parser = subparsers.add_parser("pack", help="Pack all assets from the given directory into the index and data files.")
@@ -400,7 +403,7 @@ if __name__ == "__main__":
         with open(args.index_file, "rb") as f:
             asset_index = AssetIndex.read_from_file(f)
         asset_data = AssetData(asset_index, args.data_file)
-        asset_data.extract_files(args.output_dir, only_section=args.section)
+        asset_data.extract_files(args.output_dir, only_section=args.section, only_filename=args.filename)
         print("Unpacking complete!")
     elif args.command == "pack":
         asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file)
