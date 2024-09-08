@@ -1,5 +1,6 @@
 import sys, os, struct
 from functools import reduce
+from pxr import Usd, UsdGeom, Gf
 
 
 def read_string(file):
@@ -72,67 +73,6 @@ def _write_multi(file, format, values):
 class Mesh:
     def __init__(self, submeshes):
         self._submeshes = submeshes
-
-    def write_to_obj(self, obj_file, mtl_file, mtl_filepath):
-        obj_file.write(f"# Exported from RW:ED\n")
-
-        # Write reference to the material file (.mtl)
-        obj_file.write(f"mtllib {os.path.basename(mtl_filepath)}\n")
-        
-        for submesh in self._submeshes:
-            material, spec_map, positions, normals, colours, uvs, indices = submesh
-
-            # Use the material from the material library
-            obj_file.write(f"\nusemtl {material}\n")
-            
-            # Write a comment with the material name
-            obj_file.write(f"\n# Material: {material}\n")
-            
-            # Write vertex positions
-            for position in positions:
-                obj_file.write(f"v {position[0]} {position[1]} {position[2]}\n")
-            
-            # Write texture coordinates (if present)
-            for uv in uvs:
-                obj_file.write(f"vt {uv[0]} {uv[1]}\n")
-            
-            # Write vertex normals (if present)
-            for normal in normals:
-                obj_file.write(f"vn {normal[0]} {normal[1]} {normal[2]}\n")
-
-            # Write face indices (OBJ is 1-based index)
-            for i in range(0, len(indices), 3):
-                # The face format in OBJ: f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3
-                v1, v2, v3 = indices[i], indices[i+1], indices[i+2]
-                obj_file.write(f"f {v1+1}/{v1+1}/{v1+1} "
-                        f"{v2+1}/{v2+1}/{v2+1} "
-                        f"{v3+1}/{v3+1}/{v3+1}\n")
-
-        print(f"Mesh successfully exported")
-
-        # Write the .mtl file
-        self.write_mtl(mtl_file)
-
-    def write_mtl(self, f):
-        f.write(f"# Exported from RW:ED\n")
-        
-        for submesh in self._submeshes:
-            material, spec_map, positions, normals, colours, uvs, indices = submesh
-            
-            # Write material properties (for now, we assume simple properties)
-            f.write(f"\nnewmtl {material}\n")
-            f.write("Ka 1.000 1.000 1.000\n")  # Ambient color (white)
-            f.write("Kd 1.000 1.000 1.000\n")  # Diffuse color (white)
-            f.write("Ks 0.000 0.000 0.000\n")  # Specular color (black)
-            f.write("d 1.0\n")  # Transparency (opaque)
-            f.write("illum 2\n")  # Illumination model (default)
-            f.write(f"map_Kd {material}.tga\n")  # Diffuse texture
-
-            # Check if we have a specular map (assuming spec_map exists in your material)
-            if spec_map:
-                f.write(f"map_Ks {spec_map}.tga\n")  # Specular map
-        
-        print(f"Materials successfully exported")
 
     def write_to_rwm(self, f):
         f.write(b"MSH\x01")
@@ -245,81 +185,85 @@ class Mesh:
 
         return Mesh(submeshes)
     
+    def export_to_usd(self, filepath):
+        # Create a new USD stage
+        stage = Usd.Stage.CreateNew(filepath)
+        
+        # Create the root Xform (transform) node for the mesh
+        root_prim = UsdGeom.Xform.Define(stage, "/Root")
+        
+        # Loop through submeshes and export them as individual meshes
+        for submesh_idx, submesh in enumerate(self._submeshes):
+            material, spec_map, positions, normals, colours, uvs, indices = submesh
+            
+            # Create a mesh node under /Root for each submesh
+            mesh_path = f"/Root/Submesh{submesh_idx}"
+            mesh_prim = UsdGeom.Mesh.Define(stage, mesh_path)
+            
+            # Set vertex positions
+            points = [Gf.Vec3f(p[0], p[1], p[2]) for p in positions]
+            mesh_prim.GetPointsAttr().Set(points)
+            
+            # Set normals if available
+            if normals:
+                normals_gf = [Gf.Vec3f(n[0], n[1], n[2]) for n in normals]
+                mesh_prim.GetNormalsAttr().Set(normals_gf)
+            
+            # Set UVs if available
+            if uvs:
+                st_values = [Gf.Vec2f(uv[0], uv[1]) for uv in uvs]
+                tex_coords_attr = mesh_prim.CreatePrimvar("st", UsdGeom.Primvar.TypeFloat2, interpolation="vertex")
+                tex_coords_attr.Set(st_values)
+            
+            # Set face vertex indices
+            mesh_prim.GetFaceVertexIndicesAttr().Set(indices)
+            
+            # Create face vertex counts (all triangles, so each face has 3 vertices)
+            face_vertex_counts = [3] * (len(indices) // 3)
+            mesh_prim.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+            
+        # Save the stage
+        stage.GetRootLayer().Save()
+
+        print(f"Mesh successfully exported to USD: {filepath}")
+
     @classmethod
-    def read_from_obj_file(cls, f):
+    def import_from_usd(self, filepath):
+        # Load the USD stage
+        stage = Usd.Stage.Open(filepath)
+        root_prim = stage.GetPrimAtPath("/Root")
+        
         submeshes = []
-        current_mat = None
-        current_spec_map = None
-        current_positions = []
-        current_normals = []
-        current_colours = []
-        current_uvs = []
-        current_indices = []            
 
-        vertex_dict = {
-            "v": current_positions,
-            "vn": current_normals,
-            "vt": current_uvs
-        }
+        # Iterate over submesh nodes
+        for child in root_prim.GetChildren():
+            if not child.IsA(UsdGeom.Mesh):
+                continue  # Skip if it's not a mesh
 
-        for line in f.readlines():
-            words = line.split()
-            if not words or words[0].startswith("#"):
-                continue
+            mesh_prim = UsdGeom.Mesh(child)
+            
+            # Read vertex positions
+            positions_attr = mesh_prim.GetPointsAttr()
+            positions = positions_attr.Get()
 
-            elif words[0] == "mtllib":
-                continue  # This is only useful for the spec map, so let's not bother for now
+            # Read normals
+            normals_attr = mesh_prim.GetNormalsAttr()
+            normals = normals_attr.Get() if normals_attr else []
 
-            elif words[0] == "usemtl":
-                if current_mat:
-                    assert len(current_positions) == len(current_normals) == len(current_uvs)
-                    current_colours = [(1., 1., 1., 1.) for _ in current_positions]
-                    submeshes.append((current_mat,
-                                    current_spec_map,
-                                    current_positions,
-                                    current_normals,
-                                    current_colours,
-                                    current_uvs,
-                                    current_indices))
-                    submeshes = []
-                    current_mat = None
-                    current_spec_map = None
-                    current_positions = []
-                    current_normals = []
-                    current_colours = []
-                    current_uvs = []
-                    current_indices = []
-                current_mat = words[1]
+            # Read UVs
+            tex_coords_primvar = mesh_prim.GetPrimvar("st")
+            uvs = tex_coords_primvar.Get() if tex_coords_primvar else []
 
-            elif words[0] == "f":
-                assert len(words) == 4 #and all(v.split("/")[0] == v.split("/")[1] == v.split("/")[2] for v in words[1:])
-                for v in words[1:]:
-                    current_indices.append(int(v.split("/")[0])-1)
+            # Read face indices
+            indices_attr = mesh_prim.GetFaceVertexIndicesAttr()
+            indices = indices_attr.Get()
 
-            elif words[0] in vertex_dict:
-                thing = tuple(float(word) for word in words[1:])
-                vertex_dict[words[0]].append(thing)
+            # For simplicity, let's assume no per-face materials for now
+            material = "DefaultMaterial"
 
-            else:
-                print("Not handling line:", line)
+            submeshes.append((material, positions, normals, [], uvs, indices))
 
-        assert len(current_positions) == len(current_normals) == len(current_uvs)
-        current_colours = [(1., 1., 1., 1.) for _ in current_positions]
-        submeshes.append((current_mat,
-                        current_spec_map,
-                        current_positions,
-                        current_normals,
-                        current_colours,
-                        current_uvs,
-                        current_indices))
-        submeshes = []
-        current_mat = None
-        current_spec_map = None
-        current_positions = []
-        current_normals = []
-        current_colours = []
-        current_uvs = []
-        current_indices = []
+        print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(submeshes)
 
 
@@ -327,14 +271,12 @@ if __name__ == "__main__":
     in_path = sys.argv[1]
     out_path = sys.argv[2]
     print(f"Converting {in_path} => {out_path}".center(80, "="))
-    basename, extension = os.path.splitext(in_path)
-    with open(in_path, "rb" if extension == ".rwm" else "r") as in_file:
-        if extension == ".rwm":
+    basename, in_extension = os.path.splitext(in_path)
+    if in_extension == ".rwm":
+        with open(in_path, "rb") as in_file:
             m = Mesh.read_from_rwm_file(in_file)
-            with open(out_path, "w") as f1:
-                with open(os.path.splitext(out_path)[0] + ".mtl", "w") as f2:
-                    m.write_to_obj(f1, f2, os.path.splitext(out_path)[0] + ".mtl")
-        else:
-            m = Mesh.read_from_obj_file(in_file)
-            with open(out_path, "wb" if extension == ".rwm" else "w") as out_file:
-                m.write_to_rwm(out_file)
+            m.export_to_usd(out_path)
+    else:
+        m = Mesh.import_from_usd(in_path)
+        with open(out_path, "wb") as out_file:
+            m.write_to_rwm(out_file)
