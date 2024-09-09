@@ -72,59 +72,73 @@ def _write_multi(file, format, values):
 
 
 class Mesh:
-    def __init__(self, submeshes):
-        self._submeshes = submeshes
+    def __init__(self,
+                 positions: list[tuple],
+                 normals: list[tuple],
+                 colours: list[tuple],
+                 uvs: list[tuple],
+                 face_sets: list):
+        self.positions = positions
+        self.normals = normals
+        self.colours = colours
+        self.uvs = uvs
+        self.face_sets = face_sets
+
+    class FaceSet:
+        def __init__(self, material: str, spec_map: str | None, fvtx_indices: list[int]):
+            self.material = material
+            self.spec_map = spec_map
+            self.fvtx_indices = fvtx_indices
+        
+        def num_tris(self):
+            return len(self.fvtx_indices) // 3
 
     def write_to_rwm(self, f):
         f.write(b"MSH\x01")
-        write_uint(f, 0)  # num_mysteries
-        write_uint(f, len(self._submeshes))
-        all_positions = reduce(lambda a, b: a + b, [submesh[2] for submesh in self._submeshes])
-        all_indices = reduce(lambda a, b: a + b, [submesh[6] for submesh in self._submeshes])
-        write_uint(f, len(all_positions))
-        write_uint(f, len(all_indices) // 3)
+        write_uint(f, 0)  # num_locators
+        write_uint(f, len(self.face_sets))
+        write_uint(f, len(self.positions))
+        write_uint(f, sum(fs.num_tris() for fs in self.face_sets))
         write_uint(f, 1)  # ???
-        minx = min(v[0] for v in all_positions)
-        miny = min(v[1] for v in all_positions)
-        minz = min(v[2] for v in all_positions)
-        maxx = max(v[0] for v in all_positions)
-        maxy = max(v[1] for v in all_positions)
-        maxz = max(v[2] for v in all_positions)
+        minx = min(v[0] for v in self.positions)
+        miny = min(v[1] for v in self.positions)
+        minz = min(v[2] for v in self.positions)
+        maxx = max(v[0] for v in self.positions)
+        maxy = max(v[1] for v in self.positions)
+        maxz = max(v[2] for v in self.positions)
         write_floats(f, (minx, miny, minz))
         write_floats(f, (maxx, maxy, maxz))
         write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
         write_float(f, 30.)  # Mass?
 
-        # TODO: write mysteries here
+        # TODO: write locators here
 
-        for submesh in self._submeshes:
-            material = submesh[0]
-            spec_map = submesh[1]
-            write_string(f, material)
-            write_string(f, spec_map or "")
+        for face_set in self.face_sets:
+            write_string(f, face_set.material)
+            write_string(f, face_set.spec_map or "")
             f.write(b"\xcc\xcc\xcc\xff")
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for submesh in self._submeshes:
+        for face_set in self.face_sets:
             write_uint(f, 0)
-            num_verts = len(submesh[2])  # Positions
+            num_verts = len(face_set.fvtx_indices)
             write_uint(f, num_verts)
             for i in range(num_verts):
-                write_floats(f, submesh[2][i])
-                write_floats(f, submesh[3][i])
-                write_uchars(f, (int(c*255) for c in submesh[4][i]))
-                uv = submesh[5][i]
+                write_floats(f, self.positions[face_set.fvtx_indices[i]])
+                write_floats(f, self.normals[face_set.fvtx_indices[i]])
+                write_uchars(f, (int(c*255) for c in self.colours[face_set.fvtx_indices[i]]))
+                uv = self.uvs[face_set.fvtx_indices[i]]
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
             write_uints(f, (1, 0))
-            write_uint(f, len(submesh[6])/3)
-            write_ushorts(f, submesh[6])
+            write_uint(f, face_set.num_tris())
+            write_ushorts(f, face_set.fvtx_indices)
 
     @classmethod
     def read_from_rwm_file(cls, f):
         assert f.read(4) == b"MSH\x01"
-        num_mysteries = read_uint(f)
-        print(f"Number of mysteries: {num_mysteries}")
+        num_locators = read_uint(f)
+        print(f"Number of locators: {num_locators}")
         num_materials = read_uint(f)
         print(f"Number of materials: {num_materials}")
         print(f"Total number of verts: {read_uint(f)}")
@@ -135,19 +149,19 @@ class Mesh:
         print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
         print(f"Something else (mass?): {read_float(f)}")
 
-        mysteries = []
-        for _ in range(num_mysteries):
-            mystery = read_string(f)
-            print(f"\nMystery: {mystery}")
-            mysteries.append(mystery)
+        locators = []
+        for _ in range(num_locators):
+            locator = read_string(f)
+            print(f"\nlocator: {locator}")
+            locators.append(locator)
             f.read(0x44)  # Who cares
 
-        materials = []
+        material_names = []
         spec_maps = {}
         for _ in range(num_materials):
             material = read_string(f)
             print(f"\nMaterial: {material}")
-            materials.append(material)
+            material_names.append(material)
             spec_map = read_string(f)  # The specular map may be an empty string if not present
             if spec_map:
                 print(f"Specular map: {spec_map}")
@@ -156,13 +170,13 @@ class Mesh:
             print(f"No idea: {read_float(f)}")
             print(f"Another number (flags?): {read_uint(f)}")
 
-        submeshes = []
-        num_indices = 0
-        for material in materials:  # Each material is a string
-            positions = []
-            normals = []
-            colours = []
-            uvs = []
+        face_sets = []
+
+        positions = []
+        normals = []
+        colours = []
+        uvs = []
+        for material in material_names:  # Each material is a string
             assert read_uint(f) == 0
             num_verts = read_uint(f)
             print(f"Number of vertices for this material ({material}): {num_verts}")
@@ -177,16 +191,17 @@ class Mesh:
             assert read_uints(f, 2) == (1, 0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
-            indices = [i - num_indices for i in read_ushorts(f, num_tris*3)]
-            num_indices += max(indices) + 1
-            submeshes.append((material, spec_maps.get(material), positions, normals, colours, uvs, indices))
+            indices = read_ushorts(f, num_tris*3)
+            face_set = cls.FaceSet(material, spec_maps.get(material), indices)
+            assert num_tris == face_set.num_tris()
+            face_sets.append(face_set)
 
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
         print("Dynamics part", "follows" if next_part else "does NOT follow")
         assert next_part == b"DYS\x01" or not next_part
 
-        return Mesh(submeshes)
+        return Mesh(positions, normals, colours, uvs, face_sets)
     
     def export_to_usd(self, filepath):
         # Create a new USD stage
@@ -197,57 +212,26 @@ class Mesh:
 
         # Create a single mesh node for all submeshes
         mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
-        
-        all_positions = []
-        all_normals = []
-        all_uvs = []
-        all_indices = []
-        face_vertex_counts = []
-        face_sets = {}
-
-        vertex_offset = 0
-
-        # Iterate through submeshes to gather combined geometry data
-        for submesh_idx, submesh in enumerate(self._submeshes):
-            material, spec_map, positions, normals, colours, uvs, indices = submesh
-
-            # Add vertices, normals, uvs to combined arrays
-            all_positions.extend([Gf.Vec3f(p[0], p[1], p[2]) for p in positions])
-            all_normals.extend([Gf.Vec3f(n[0], n[1], n[2]) for n in normals])
-            all_uvs.extend([Gf.Vec2f(uv[0], uv[1]) for uv in uvs])
-
-            # Adjust indices to account for the vertex offset
-            adjusted_indices = [i + vertex_offset for i in indices]
-            all_indices.extend(adjusted_indices)
-
-            # Set face vertex counts (all triangles)
-            face_vertex_counts.extend([3] * (len(indices) // 3))
-
-            # Track faces for face sets (group faces by material)
-            if material not in face_sets:
-                face_sets[material] = []
-            face_sets[material].extend(range(len(face_vertex_counts) - len(indices) // 3, len(face_vertex_counts)))
-
-            # Update the vertex offset for the next submesh
-            vertex_offset += len(positions)
 
         # Set vertex positions, normals, uvs, and face indices in the mesh
-        mesh_prim.GetPointsAttr().Set(all_positions)
-        mesh_prim.GetNormalsAttr().Set(all_normals)
+        mesh_prim.GetPointsAttr().Set(self.positions)
+        mesh_prim.GetNormalsAttr().Set(self.normals)
+        all_indices = reduce(lambda a, b: a + b, [fs.fvtx_indices for fs in self.face_sets])
         mesh_prim.GetFaceVertexIndicesAttr().Set(all_indices)
-        mesh_prim.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+        total_num_tris = sum(fs.num_tris() for fs in self.face_sets)
+        mesh_prim.GetFaceVertexCountsAttr().Set([3] * total_num_tris)
 
         # Set UVs (texture coordinates) in a Primvar
         st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
                                                                   Sdf.ValueTypeNames.TexCoord2fArray,
                                                                   interpolation="faceVarying")
-        st_primvar.Set(all_uvs)
+        st_primvar.Set(self.uvs)
 
         # Create face sets for each material
         geom_subsets = {}
-        for material, face_indices in face_sets.items():
-            subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, material, "someElementType", face_indices)
-            geom_subsets[material] = subset
+        for face_set in self.face_sets:
+            subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_set.fvtx_indices)
+            geom_subsets[face_set.material] = subset
 
         # Export materials and bind to the mesh
         self.export_usd_materials(stage, geom_subsets)
