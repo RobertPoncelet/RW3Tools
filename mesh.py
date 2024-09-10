@@ -1,5 +1,6 @@
 import sys, os, struct
 from functools import reduce
+from dataclasses import dataclass
 from pxr import Usd, UsdGeom, UsdShade, Gf, Sdf
 from pprint import pprint
 
@@ -72,42 +73,77 @@ def _write_multi(file, format, values):
 
 
 class Mesh:
-    def __init__(self,
-                 positions: list[tuple],
-                 normals: list[tuple],
-                 colours: list[tuple],
-                 uvs: list[tuple],
-                 face_sets: list):
-        self.positions = positions
-        self.normals = normals
-        self.colours = colours
-        self.uvs = uvs
-        self.face_sets = face_sets
+    def __init__(self, tri_sets: list):
+        self.tri_sets = tri_sets
 
-    class FaceSet:
-        def __init__(self, material: str, spec_map: str | None, colour: tuple[float], fvtx_indices: list[int]):
-            self.material = material
-            self.spec_map = spec_map
-            self.colour = colour
-            assert (len(fvtx_indices) % 3) == 0
-            self.fvtx_indices = fvtx_indices
+    @dataclass
+    class Triangle:
+        points: tuple
+        normals: tuple
+        colours: tuple
+        uvs: tuple
+
+        # First 4 buffers will include all the vertices in the mesh so far, while the index buffer
+        # will be just for this tri set
+        @classmethod
+        def from_buffers(cls, point_buffer, normal_buffer, colour_buffer, uv_buffer, index_buffer,
+                         offset):
+            i = index_buffer[offset]
+            j = index_buffer[offset+1]
+            k = index_buffer[offset+2]
+            def item(buffer):
+                return (buffer[i], buffer[j], buffer[k])
+            return cls(item(point_buffer), item(normal_buffer), item(colour_buffer), item(uv_buffer))
+
+    @dataclass
+    class TriSet:
+        material: str
+        spec_map: str | None
+        colour: tuple[float]
+        triangles: list
+
+        def num_verts(self):
+            return len(self.triangles) * 3
         
         def num_tris(self):
-            return len(self.fvtx_indices) // 3
+            return len(self.triangles)
+        
+        def iterate_verts(self):
+            for tri in self.triangles:
+                for i in range(3):
+                    yield tri.points[i], tri.normals[i], tri.colours[i], tri.uvs[i]
+        
+        def indices(self):
+            # TODO: this will need to be changed once we implement vertex sharing
+            return list(range(self.num_verts()))
+
+        @classmethod
+        def from_buffers(cls, material, spec_map, colour, point_buffer, normal_buffer,
+                         colour_buffer, uv_buffer, index_buffer, offset):
+            tris = []
+            for i in range(0, len(index_buffer), 3):
+                tris.append(Mesh.Triangle.from_buffers(point_buffer, normal_buffer, colour_buffer,
+                                                      uv_buffer, index_buffer, i+offset))
+            return cls(material, spec_map, colour, tris)
+        
+    def positions(self):
+        for tri_set in self.tri_sets:
+            for pos, _, _, _ in tri_set.iterate_verts():
+                yield pos
 
     def write_to_rwm(self, f):
         f.write(b"MSH\x01")
         write_uint(f, 0)  # num_locators
-        write_uint(f, len(self.face_sets))
-        write_uint(f, len(self.positions))
-        write_uint(f, sum(fs.num_tris() for fs in self.face_sets))
+        write_uint(f, len(self.tri_sets))
+        write_uint(f, sum(fs.num_verts() for fs in self.tri_sets))
+        write_uint(f, sum(fs.num_tris() for fs in self.tri_sets))
         write_uint(f, 1)  # ???
-        minx = min(v[0] for v in self.positions)
-        miny = min(v[1] for v in self.positions)
-        minz = min(v[2] for v in self.positions)
-        maxx = max(v[0] for v in self.positions)
-        maxy = max(v[1] for v in self.positions)
-        maxz = max(v[2] for v in self.positions)
+        minx = min(v[0] for v in self.positions())
+        miny = min(v[1] for v in self.positions())
+        minz = min(v[2] for v in self.positions())
+        maxx = max(v[0] for v in self.positions())
+        maxy = max(v[1] for v in self.positions())
+        maxz = max(v[2] for v in self.positions())
         write_floats(f, (minx, miny, minz))
         write_floats(f, (maxx, maxy, maxz))
         write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
@@ -115,27 +151,28 @@ class Mesh:
 
         # TODO: write locators here
 
-        for face_set in self.face_sets:
-            write_string(f, face_set.material)
-            write_string(f, face_set.spec_map or "")
-            assert(len(face_set.colour) == 4)
-            write_uchars(f, tuple(int(c*255) for c in face_set.colour))
+        for tri_set in self.tri_sets:
+            write_string(f, tri_set.material)
+            write_string(f, tri_set.spec_map or "")
+            assert(len(tri_set.colour) == 4)
+            write_uchars(f, tuple(int(c*255) for c in tri_set.colour))
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for face_set in self.face_sets:
+        for tri_set in self.tri_sets:
             write_uint(f, 0)
-            num_verts = len(face_set.fvtx_indices)
-            write_uint(f, num_verts)
-            for i in range(num_verts):
-                write_floats(f, self.positions[face_set.fvtx_indices[i]])
-                write_floats(f, self.normals[face_set.fvtx_indices[i]])
-                write_uchars(f, tuple(int(c*255) for c in self.colours[face_set.fvtx_indices[i]]))
-                uv = self.uvs[face_set.fvtx_indices[i]]
+            write_uint(f, tri_set.num_verts())
+            mat_normals = []
+            for pos, normal, colour, uv in tri_set.iterate_verts():
+                write_floats(f, pos)
+                write_floats(f, normal)
+                write_uchars(f, tuple(int(c*255) for c in colour))
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
+                mat_normals.append(normal)
+            print(f"write_to_rwm {tri_set.material} normals: {mat_normals}")
             write_uints(f, (1, 0))
-            write_uint(f, face_set.num_tris())
-            write_ushorts(f, face_set.fvtx_indices)
+            write_uint(f, tri_set.num_tris())
+            write_ushorts(f, tri_set.indices())
 
     @classmethod
     def read_from_rwm_file(cls, f):
@@ -176,38 +213,48 @@ class Mesh:
             print(f"No idea: {read_float(f)}")
             print(f"Another number (flags?): {read_uint(f)}")
 
-        face_sets = []
+        tri_sets = []
 
         positions = []
         normals = []
         colours = []
         uvs = []
+
         for material in material_names:  # Each material is a string
             assert read_uint(f) == 0
             num_verts = read_uint(f)
             print(f"Number of vertices for this material ({material}): {num_verts}")
 
+            mat_normals = []
+            offset = len(positions)
+
             for _ in range(num_verts):
                 positions.append(read_floats(f, 3))
                 normals.append(read_floats(f, 3))
+                mat_normals.append(normals[-1])
                 colours.append((c / 255. for c in read_uchars(f, 4)))
                 uv = read_floats(f, 2)
                 uvs.append((uv[0], -uv[1]))  # Flip V
+
+            print(f"read_from_rwm {material} normals: {mat_normals}")
 
             assert read_uints(f, 2) == (1, 0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
             indices = read_ushorts(f, num_tris*3)
-            face_set = cls.FaceSet(material, spec_maps.get(material), mat_colours[material], indices)
-            assert num_tris == face_set.num_tris()
-            face_sets.append(face_set)
+
+            tri_set = cls.TriSet.from_buffers(material, spec_maps.get(material),
+                                              mat_colours[material], positions, normals, colours,
+                                              uvs, indices, offset)
+            assert num_tris == tri_set.num_tris()
+            tri_sets.append(tri_set)
 
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
         print("Dynamics part", "follows" if next_part else "does NOT follow")
         assert next_part == b"DYS\x01" or not next_part
 
-        return Mesh(positions, normals, colours, uvs, face_sets)
+        return Mesh(tri_sets)
     
     def export_to_usd(self, filepath):
         # Create a new USD stage
@@ -219,36 +266,38 @@ class Mesh:
         # Create a single mesh node for all submeshes
         mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
 
-        # Set vertex positions, normals, uvs, and face indices in the mesh
-        mesh_prim.GetPointsAttr().Set(self.positions)
-        mesh_prim.GetNormalsAttr().Set(self.normals)
-        all_indices = reduce(lambda a, b: a + b, [fs.fvtx_indices for fs in self.face_sets])
-        mesh_prim.GetFaceVertexIndicesAttr().Set(all_indices)
-        total_num_tris = sum(fs.num_tris() for fs in self.face_sets)
-        mesh_prim.GetFaceVertexCountsAttr().Set([3] * total_num_tris)
-
-        # Set UVs (texture coordinates) in a Primvar
-        st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
-                                                                  Sdf.ValueTypeNames.TexCoord2fArray,
-                                                                  interpolation="faceVarying")
-        st_primvar.Set(self.uvs)
+        positions = []
+        normals = []
+        colours = []
+        uvs = []
 
         # Create face sets for each material
         start_face_index = 0
-        for face_set in self.face_sets:
-            face_indices = range(start_face_index, start_face_index + face_set.num_tris())
-            start_face_index += face_set.num_tris()
-            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "face", face_indices)
+        for tri_set in self.tri_sets:
+            face_indices = range(start_face_index, start_face_index + tri_set.num_tris())
+            start_face_index += tri_set.num_tris()
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, tri_set.material, "face", face_indices)
+
+            mat_normals = []
+
+            for pos, normal, colour, uv in tri_set.iterate_verts():
+                positions.append(pos)
+                normals.append(normal)
+                mat_normals.append(normal)
+                colours.append(colour)
+                uvs.append(uv)
+
+            print(f"export_to_usd {tri_set.material} normals: {mat_normals}")
 
             # Create a Material node under /Root/Materials/
-            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{face_set.material}")
+            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{tri_set.material}")
 
             # Create a simple shader (you can extend this to support more complex material properties)
-            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{face_set.material}/Principled_BSDF")
+            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{tri_set.material}/Principled_BSDF")
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
-            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*face_set.colour[:3]))  # OwO
+            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*tri_set.colour[:3]))  # OwO
             shader_prim.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
             shader_prim.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
 
@@ -257,6 +306,22 @@ class Mesh:
 
             # Bind material to the mesh faces that use it
             UsdShade.MaterialBindingAPI(geom_subset).Bind(material_prim)
+
+        # Set vertex positions, normals, uvs, and face indices in the mesh
+        mesh_prim.GetPointsAttr().Set(positions)
+        mesh_prim.GetNormalsAttr().Set(normals)
+        total_num_verts = sum(ts.num_verts() for ts in self.tri_sets)
+        # TODO: this will need to be changed once we implement vertex sharing
+        all_indices = list(range(total_num_verts)) #reduce(lambda a, b: a + b, [ts.indices() for ts in self.tri_sets])
+        mesh_prim.GetFaceVertexIndicesAttr().Set(all_indices)
+        total_num_tris = sum(ts.num_tris() for ts in self.tri_sets)
+        mesh_prim.GetFaceVertexCountsAttr().Set([3] * total_num_tris)
+
+        # Set UVs (texture coordinates) in a Primvar
+        st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
+                                                                  Sdf.ValueTypeNames.TexCoord2fArray,
+                                                                  interpolation="faceVarying")
+        st_primvar.Set(uvs)
 
         # Save the stage
         stage.GetRootLayer().Save()
@@ -335,39 +400,42 @@ class Mesh:
         assert len(usd_fvtx_indices) == len(usd_normals) == len(usd_uvs)
         assert all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get())
         
-        positions = []
-        normals = []
-        colours = []
-        uvs = []
-        face_sets = []
+        tri_sets = []
 
-        # Handle materials and face sets
+        # Handle materials and tri sets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
         for i, subset in enumerate(geom_subsets):
-            material = subset.GetPrim().GetName()  # Use the face set name as the material
+            material = subset.GetPrim().GetName()  # Use the subset name as the material
 
             face_indices = subset.GetIndicesAttr().Get()
             
-            # Extract the face set using indices from the geom subset
-            rwm_fvtx_indices = []
+            # Extract the tri set using indices from the geom subset
+            triangles = []
+            mat_normals = []
             for face_index in face_indices:
                 start = face_index * 3
+                positions = []
+                normals = []
+                colours = []
+                uvs = []
                 for fvtx_index in start, start+1, start+2:
                     pos_index = usd_fvtx_indices[fvtx_index]
                     positions.append(usd_points[pos_index])
                     normals.append(usd_normals[fvtx_index])
+                    mat_normals.append(usd_normals[fvtx_index])
                     colours.append((1., 1., 1., 1.))  # TODO
                     uvs.append(usd_uvs[fvtx_index])
 
-                    rwm_fvtx_indices.append(fvtx_index)
+                triangles.append(cls.Triangle(positions, normals, colours, uvs))
+            print(f"import_from_usd {material} normals: {mat_normals}")
             # TODO: proper colours
             r = [1., 0., 0.][i]
             g = [0., 1., 0.][i]
             b = [0., 0., 1.][i]
-            face_sets.append(cls.FaceSet(material, None, (r, g, b, 1.), rwm_fvtx_indices))
+            tri_sets.append(cls.TriSet(material, None, (r, g, b, 1.), triangles))
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(positions, normals, colours, uvs, face_sets)
+        return Mesh(tri_sets)
 
 
 if __name__ == "__main__":
