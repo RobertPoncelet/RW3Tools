@@ -232,30 +232,17 @@ class Mesh:
         st_primvar.Set(self.uvs)
 
         # Create face sets for each material
-        geom_subsets_and_mat_names = []
         start_face_index = 0
         for face_set in self.face_sets:
             face_indices = range(start_face_index, start_face_index + face_set.num_tris())
             start_face_index += face_set.num_tris()
-            subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_indices)
-            geom_subsets_and_mat_names.append((subset, face_set.material))
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_indices)
 
-        # Export materials and bind to the mesh
-        self.export_usd_materials(stage, geom_subsets_and_mat_names)
-
-        # Save the stage
-        stage.GetRootLayer().Save()
-
-        print(f"Mesh successfully exported to USD: {filepath}")
-
-    def export_usd_materials(self, stage, geom_subsets):
-        for geom_subset, material_name in geom_subsets:
-            print(f"Assigning {material_name} to {geom_subset}")
             # Create a Material node under /Root/Materials/
-            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{material_name}")
+            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{face_set.material}")
 
             # Create a simple shader (you can extend this to support more complex material properties)
-            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{material_name}/PBRShader")
+            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{face_set.material}/PBRShader")
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
@@ -268,6 +255,11 @@ class Mesh:
 
             # Bind material to the mesh faces that use it
             UsdShade.MaterialBindingAPI(geom_subset).Bind(material_prim)
+
+        # Save the stage
+        stage.GetRootLayer().Save()
+
+        print(f"Mesh successfully exported to USD: {filepath}")
     
     @staticmethod
     def get_texture_path(material_prim):
@@ -319,7 +311,7 @@ class Mesh:
         return None
 
     @classmethod
-    def import_from_usd(self, filepath):
+    def import_from_usd(cls, filepath):
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
         default_prim = stage.GetDefaultPrim()
@@ -332,26 +324,24 @@ class Mesh:
         else:
             # Search for any Mesh
             mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
-        print("Mesh prim:", mesh_prim)
         mesh = UsdGeom.Mesh(mesh_prim)
         
         positions = mesh.GetPointsAttr().Get()
-        pprint(positions)
         normals = mesh.GetNormalsAttr().Get()
-        pprint(normals)
         indices = mesh.GetFaceVertexIndicesAttr().Get()
         pprint(indices)
-        uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("UVMap").Get()
-        pprint(uvs)
+        colours = [(1., 1., 1., 1.) for _ in range(len(indices))]
+        assert all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get())
+        uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
         
-        submeshes = []
+        face_sets = []
 
         # Handle materials and face sets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
         for subset in geom_subsets:
             material = subset.GetPrim().GetName()  # Use the face set name as the material
-            subset_indices = subset.GetIndicesAttr().Get()
-            pprint(subset_indices)
+            face_indices = subset.GetIndicesAttr().Get()
+            pprint(face_indices)
             def face_indices_to_fvtx_indices(face_indices):
                 ret = []
                 for face_index in face_indices:
@@ -360,17 +350,13 @@ class Mesh:
                 return ret
             
             # Extract the submesh using indices from the face set
-            submesh_indices = [indices[i] for i in face_indices_to_fvtx_indices(subset_indices)]
-            submesh_positions = [positions[i] for i in submesh_indices]
-            submesh_normals = [normals[i] for i in submesh_indices]
-            submesh_uvs = [uvs[i] for i in submesh_indices]
+            fvtx_indices = [indices[i] for i in face_indices_to_fvtx_indices(face_indices)]
             
-            submeshes.append((material, None, submesh_positions, submesh_normals, [], submesh_uvs, submesh_indices))
-            pprint(submeshes[-1])
+            face_sets.append(cls.FaceSet(material, None, fvtx_indices))
             print()
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(submeshes)
+        return Mesh(positions, normals, colours, uvs, face_sets)
 
 
 if __name__ == "__main__":
