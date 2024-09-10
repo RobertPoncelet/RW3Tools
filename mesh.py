@@ -68,7 +68,7 @@ def _write_single(file, format, value):
     file.write(struct.pack("<" + format, value))
 
 def _write_multi(file, format, values):
-    file.write(struct.pack("<" + (format * len(values)), values))
+    file.write(struct.pack("<" + (format * len(values)), *values))
 
 
 class Mesh:
@@ -88,14 +88,11 @@ class Mesh:
         def __init__(self, material: str, spec_map: str | None, fvtx_indices: list[int]):
             self.material = material
             self.spec_map = spec_map
+            assert (len(fvtx_indices) % 3) == 0
             self.fvtx_indices = fvtx_indices
         
         def num_tris(self):
             return len(self.fvtx_indices) // 3
-        
-        def tri_indices(self):
-            start = (min(self.fvtx_indices) + 3) // 3
-            return range(start, start + self.num_tris())
 
     def write_to_rwm(self, f):
         f.write(b"MSH\x01")
@@ -131,7 +128,7 @@ class Mesh:
             for i in range(num_verts):
                 write_floats(f, self.positions[face_set.fvtx_indices[i]])
                 write_floats(f, self.normals[face_set.fvtx_indices[i]])
-                write_uchars(f, (int(c*255) for c in self.colours[face_set.fvtx_indices[i]]))
+                write_uchars(f, tuple(int(c*255) for c in self.colours[face_set.fvtx_indices[i]]))
                 uv = self.uvs[face_set.fvtx_indices[i]]
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
             write_uints(f, (1, 0))
@@ -326,34 +323,39 @@ class Mesh:
             mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
         mesh = UsdGeom.Mesh(mesh_prim)
         
-        positions = mesh.GetPointsAttr().Get()
-        normals = mesh.GetNormalsAttr().Get()
-        indices = mesh.GetFaceVertexIndicesAttr().Get()
-        pprint(indices)
-        colours = [(1., 1., 1., 1.) for _ in range(len(indices))]
+        usd_points = mesh.GetPointsAttr().Get()
+        usd_fvtx_indices = mesh.GetFaceVertexIndicesAttr().Get()
+        usd_normals = mesh.GetNormalsAttr().Get()
+        usd_uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
+        assert len(usd_fvtx_indices) == len(usd_normals) == len(usd_uvs)
         assert all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get())
-        uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
         
+        positions = []
+        normals = []
+        colours = []
+        uvs = []
         face_sets = []
 
         # Handle materials and face sets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
         for subset in geom_subsets:
             material = subset.GetPrim().GetName()  # Use the face set name as the material
+
             face_indices = subset.GetIndicesAttr().Get()
-            pprint(face_indices)
-            def face_indices_to_fvtx_indices(face_indices):
-                ret = []
-                for face_index in face_indices:
-                    i = face_index * 3
-                    ret.extend([indices[i], indices[i+1], indices[i+2]])
-                return ret
             
-            # Extract the submesh using indices from the face set
-            fvtx_indices = [indices[i] for i in face_indices_to_fvtx_indices(face_indices)]
-            
-            face_sets.append(cls.FaceSet(material, None, fvtx_indices))
-            print()
+            # Extract the face set using indices from the geom subset
+            rwm_fvtx_indices = []
+            for face_index in face_indices:
+                start = face_index * 3
+                for fvtx_index in start, start+1, start+2:
+                    pos_index = usd_fvtx_indices[fvtx_index]
+                    positions.append(usd_points[pos_index])
+                    normals.append(usd_normals[fvtx_index])
+                    colours.append((1., 1., 1., 1.))
+                    uvs.append(usd_uvs[fvtx_index])
+
+                    rwm_fvtx_indices.append(fvtx_index)
+            face_sets.append(cls.FaceSet(material, None, rwm_fvtx_indices))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(positions, normals, colours, uvs, face_sets)
