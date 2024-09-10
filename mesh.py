@@ -92,6 +92,10 @@ class Mesh:
         
         def num_tris(self):
             return len(self.fvtx_indices) // 3
+        
+        def tri_indices(self):
+            start = (min(self.fvtx_indices) + 3) // 3
+            return range(start, start + self.num_tris())
 
     def write_to_rwm(self, f):
         f.write(b"MSH\x01")
@@ -228,21 +232,25 @@ class Mesh:
         st_primvar.Set(self.uvs)
 
         # Create face sets for each material
-        geom_subsets = {}
+        geom_subsets_and_mat_names = []
+        start_face_index = 0
         for face_set in self.face_sets:
-            subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_set.fvtx_indices)
-            geom_subsets[face_set.material] = subset
+            face_indices = range(start_face_index, start_face_index + face_set.num_tris())
+            start_face_index += face_set.num_tris()
+            subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_indices)
+            geom_subsets_and_mat_names.append((subset, face_set.material))
 
         # Export materials and bind to the mesh
-        self.export_usd_materials(stage, geom_subsets)
+        self.export_usd_materials(stage, geom_subsets_and_mat_names)
 
         # Save the stage
         stage.GetRootLayer().Save()
 
         print(f"Mesh successfully exported to USD: {filepath}")
 
-    def export_usd_materials(self, stage, face_sets):
-        for material_name, geom_subset in face_sets.items():
+    def export_usd_materials(self, stage, geom_subsets):
+        for geom_subset, material_name in geom_subsets:
+            print(f"Assigning {material_name} to {geom_subset}")
             # Create a Material node under /Root/Materials/
             material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{material_name}")
 
