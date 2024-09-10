@@ -85,9 +85,10 @@ class Mesh:
         self.face_sets = face_sets
 
     class FaceSet:
-        def __init__(self, material: str, spec_map: str | None, fvtx_indices: list[int]):
+        def __init__(self, material: str, spec_map: str | None, colour: tuple[float], fvtx_indices: list[int]):
             self.material = material
             self.spec_map = spec_map
+            self.colour = colour
             assert (len(fvtx_indices) % 3) == 0
             self.fvtx_indices = fvtx_indices
         
@@ -117,7 +118,8 @@ class Mesh:
         for face_set in self.face_sets:
             write_string(f, face_set.material)
             write_string(f, face_set.spec_map or "")
-            f.write(b"\xcc\xcc\xcc\xff")
+            assert(len(face_set.colour) == 4)
+            write_uchars(f, tuple(int(c*255) for c in face_set.colour))
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
@@ -159,6 +161,7 @@ class Mesh:
 
         material_names = []
         spec_maps = {}
+        mat_colours = {}
         for _ in range(num_materials):
             material = read_string(f)
             print(f"\nMaterial: {material}")
@@ -167,7 +170,9 @@ class Mesh:
             if spec_map:
                 print(f"Specular map: {spec_map}")
                 spec_maps[material] = spec_map
-            print(f"Bitfield maybe: {f.read(4)}")
+            mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
+            mat_colours[material] = mat_colour
+            print(f"Material colour(?): {mat_colour}")
             print(f"No idea: {read_float(f)}")
             print(f"Another number (flags?): {read_uint(f)}")
 
@@ -193,7 +198,7 @@ class Mesh:
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
             indices = read_ushorts(f, num_tris*3)
-            face_set = cls.FaceSet(material, spec_maps.get(material), indices)
+            face_set = cls.FaceSet(material, spec_maps.get(material), mat_colours[material], indices)
             assert num_tris == face_set.num_tris()
             face_sets.append(face_set)
 
@@ -233,17 +238,17 @@ class Mesh:
         for face_set in self.face_sets:
             face_indices = range(start_face_index, start_face_index + face_set.num_tris())
             start_face_index += face_set.num_tris()
-            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "someElementType", face_indices)
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, face_set.material, "face", face_indices)
 
             # Create a Material node under /Root/Materials/
             material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{face_set.material}")
 
             # Create a simple shader (you can extend this to support more complex material properties)
-            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{face_set.material}/PBRShader")
+            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{face_set.material}/Principled_BSDF")
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
-            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.0, 1.0, 1.0))
+            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*face_set.colour[:3]))  # OwO
             shader_prim.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
             shader_prim.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
 
@@ -338,7 +343,7 @@ class Mesh:
 
         # Handle materials and face sets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
-        for subset in geom_subsets:
+        for i, subset in enumerate(geom_subsets):
             material = subset.GetPrim().GetName()  # Use the face set name as the material
 
             face_indices = subset.GetIndicesAttr().Get()
@@ -351,11 +356,15 @@ class Mesh:
                     pos_index = usd_fvtx_indices[fvtx_index]
                     positions.append(usd_points[pos_index])
                     normals.append(usd_normals[fvtx_index])
-                    colours.append((1., 1., 1., 1.))
+                    colours.append((1., 1., 1., 1.))  # TODO
                     uvs.append(usd_uvs[fvtx_index])
 
                     rwm_fvtx_indices.append(fvtx_index)
-            face_sets.append(cls.FaceSet(material, None, rwm_fvtx_indices))
+            # TODO: proper colours
+            r = [1., 0., 0.][i]
+            g = [0., 1., 0.][i]
+            b = [0., 0., 1.][i]
+            face_sets.append(cls.FaceSet(material, None, (r, g, b, 1.), rwm_fvtx_indices))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(positions, normals, colours, uvs, face_sets)
