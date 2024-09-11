@@ -1,9 +1,12 @@
 import sys, os, struct
 from functools import reduce
 from dataclasses import dataclass
+from collections import defaultdict
 from pxr import Usd, UsdGeom, UsdShade, Gf, Sdf
 from pprint import pprint
 
+
+# Read functions
 
 def read_string(file):
     string_size = struct.unpack('<I', file.read(4))[0]
@@ -43,6 +46,8 @@ def _read_multiple(file, format, num):
     return tuple(_read_single(file, format) for _ in range(num))
 
 
+# Write functions
+
 def write_string(file, string):
     write_uint(file, len(string))
     file.write(string.encode("ascii"))
@@ -72,9 +77,46 @@ def _write_multi(file, format, values):
     file.write(struct.pack("<" + (format * len(values)), *values))
 
 
+# Data transformation functions
+
+def flatten_array(indices, indexed_array):
+    return [indexed_array[i] for i in indices]
+
+def unflatten_array(flat_array):
+    indexed_array = []
+    indices = []
+    for item in flat_array:
+        if item in indexed_array:
+            indices.append(indexed_array.index(item))
+        else:
+            indexed_array.append(item)
+            indices.append(len(indexed_array) - 1)
+    return indices, indexed_array
+
+# Returns a dictionary mapping the flat array's unique items to the indices at which they appear
+def inverse_index(flat_array):
+    mapping = defaultdict(list)
+    for i, item in enumerate(flat_array):
+       mapping[item].append(i)
+    return mapping
+
+# Turn a tuple of arrays into an array of tuples, and vice versa
+def perpendicular_slices(*arrays, container_type=tuple):
+    array_length = len(arrays[0])
+    assert all(len(a) == array_length for a in arrays)
+    array_slices = []
+    for i in range(array_length):
+        array_slices.append(container_type(a[i] for a in arrays))
+    return array_slices
+
+
 class Mesh:
-    def __init__(self, tri_sets: list):
-        self.tri_sets = tri_sets
+    def __init__(self, positions, normals, colours, uvs, materials):
+        self.positions = positions
+        self.normals = normals
+        self.colours = colours
+        self.uvs = uvs
+        self.materials = materials
 
     @dataclass
     class Triangle:
@@ -125,25 +167,42 @@ class Mesh:
                 tris.append(Mesh.Triangle.from_buffers(point_buffer, normal_buffer, colour_buffer,
                                                       uv_buffer, index_buffer, i+offset))
             return cls(material, spec_map, colour, tris)
-        
-    def positions(self):
-        for tri_set in self.tri_sets:
-            for pos, _, _, _ in tri_set.iterate_verts():
-                yield pos
 
     def write_to_rwm(self, f):
+        print("Writing to RWM".center(80, "="))
+        # Unflatten, grouped by material
+        # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
+        fvtx_data = perpendicular_slices(self.positions, self.normals, self.colours, self.uvs, self.materials)
+        fvtx_indices, vtx_data = unflatten_array(fvtx_data)  # Now we have an index for each face-vertex which maps it to a vertex
+        assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
+        vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
+        
+        # DEBUG
+        pprint(fvtx_indices)
+        pprint((vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials))
+
+        material_to_fvtxindices = defaultdict(list)
+        material_to_vertices = defaultdict(list)
+        for fvtx_index in fvtx_indices:
+            material = vtx_materials[fvtx_index]
+            vertex = vtx_data[fvtx_index]
+            material_to_fvtxindices[material].append(fvtx_index)
+            if vertex not in material_to_vertices[material]:
+                material_to_vertices[material].append(vertex)
+
         f.write(b"MSH\x01")
-        write_uint(f, 0)  # num_locators
-        write_uint(f, len(self.tri_sets))
-        write_uint(f, sum(fs.num_verts() for fs in self.tri_sets))
-        write_uint(f, sum(fs.num_tris() for fs in self.tri_sets))
+        write_uint(f, 0)  # Number of locators
+        write_uint(f, len(material_to_fvtxindices))
+        write_uint(f, len(vtx_data))
+        write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
         write_uint(f, 1)  # ???
-        minx = min(v[0] for v in self.positions())
-        miny = min(v[1] for v in self.positions())
-        minz = min(v[2] for v in self.positions())
-        maxx = max(v[0] for v in self.positions())
-        maxy = max(v[1] for v in self.positions())
-        maxz = max(v[2] for v in self.positions())
+
+        minx = min(v[0] for v in vtx_positions)
+        miny = min(v[1] for v in vtx_positions)
+        minz = min(v[2] for v in vtx_positions)
+        maxx = max(v[0] for v in vtx_positions)
+        maxy = max(v[1] for v in vtx_positions)
+        maxz = max(v[2] for v in vtx_positions)
         write_floats(f, (minx, miny, minz))
         write_floats(f, (maxx, maxy, maxz))
         write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
@@ -151,31 +210,34 @@ class Mesh:
 
         # TODO: write locators here
 
-        for tri_set in self.tri_sets:
-            write_string(f, tri_set.material)
-            write_string(f, tri_set.spec_map or "")
-            assert(len(tri_set.colour) == 4)
-            write_uchars(f, tuple(int(c*255) for c in tri_set.colour))
+        for material in material_to_fvtxindices.keys():
+            mat_name, spec_map, mat_colour = material
+            assert type(spec_map) is str
+            write_string(f, mat_name)
+            write_string(f, spec_map)
+            assert(len(mat_colour) == 4)
+            write_uchars(f, tuple(int(c*255) for c in mat_colour))
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for tri_set in self.tri_sets:
+        for material, mat_fvtx_indices in material_to_fvtxindices.items():
             write_uint(f, 0)
-            write_uint(f, tri_set.num_verts())
-            mat_normals = []
-            for pos, normal, colour, uv in tri_set.iterate_verts():
-                write_floats(f, pos)
+            vertices = material_to_vertices[material]
+            write_uint(f, len(vertices))
+            for vertex in vertices:
+                position, normal, colour, uv, _ = vertex
+                write_floats(f, position)
                 write_floats(f, normal)
+                assert len(colour) == 4
                 write_uchars(f, tuple(int(c*255) for c in colour))
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
-                mat_normals.append(normal)
-            print(f"write_to_rwm {tri_set.material} normals: {mat_normals}")
             write_uints(f, (1, 0))
-            write_uint(f, tri_set.num_tris())
-            write_ushorts(f, tri_set.indices())
+            write_uint(f, len(mat_fvtx_indices) // 3)
+            write_ushorts(f, mat_fvtx_indices)
 
     @classmethod
-    def read_from_rwm_file(cls, f):
+    def read_from_rwm(cls, f):
+        print("Reading from RWM".center(80, "="))
         assert f.read(4) == b"MSH\x01"
         num_locators = read_uint(f)
         print(f"Number of locators: {num_locators}")
@@ -196,67 +258,61 @@ class Mesh:
             locators.append(locator)
             f.read(0x44)  # Who cares
 
-        material_names = []
-        spec_maps = {}
-        mat_colours = {}
+        materials = []
         for _ in range(num_materials):
-            material = read_string(f)
-            print(f"\nMaterial: {material}")
-            material_names.append(material)
+            mat_name = read_string(f)
+            print(f"\nMaterial name: {mat_name}")
             spec_map = read_string(f)  # The specular map may be an empty string if not present
-            if spec_map:
-                print(f"Specular map: {spec_map}")
-                spec_maps[material] = spec_map
+            print(f"Specular map: {spec_map or '<no spec map>'}")
             mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
-            mat_colours[material] = mat_colour
             print(f"Material colour(?): {mat_colour}")
             print(f"No idea: {read_float(f)}")
             print(f"Another number (flags?): {read_uint(f)}")
+            materials.append((mat_name, spec_map, mat_colour))
 
-        tri_sets = []
+        fvtx_indices = []
+        vtx_positions = []
+        vtx_normals = []
+        vtx_colours = []
+        vtx_uvs = []
+        vtx_materials = []
 
-        positions = []
-        normals = []
-        colours = []
-        uvs = []
-
-        for material in material_names:  # Each material is a string
+        for material in materials:  # Each material is a string
             assert read_uint(f) == 0
             num_verts = read_uint(f)
             print(f"Number of vertices for this material ({material}): {num_verts}")
 
-            mat_normals = []
-            offset = len(positions)
-
             for _ in range(num_verts):
-                positions.append(read_floats(f, 3))
-                normals.append(read_floats(f, 3))
-                mat_normals.append(normals[-1])
-                colours.append((c / 255. for c in read_uchars(f, 4)))
+                vtx_positions.append(read_floats(f, 3))
+                vtx_normals.append(read_floats(f, 3))
+                vtx_colours.append(tuple(c / 255. for c in read_uchars(f, 4)))
                 uv = read_floats(f, 2)
-                uvs.append((uv[0], -uv[1]))  # Flip V
-
-            print(f"read_from_rwm {material} normals: {mat_normals}")
+                vtx_uvs.append((uv[0], -uv[1]))  # Flip V
+                vtx_materials.append(material)
 
             assert read_uints(f, 2) == (1, 0)
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
-            indices = read_ushorts(f, num_tris*3)
-
-            tri_set = cls.TriSet.from_buffers(material, spec_maps.get(material),
-                                              mat_colours[material], positions, normals, colours,
-                                              uvs, indices, offset)
-            assert num_tris == tri_set.num_tris()
-            tri_sets.append(tri_set)
+            fvtx_indices.extend(read_ushorts(f, num_tris*3))
 
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
         print("Dynamics part", "follows" if next_part else "does NOT follow")
         assert next_part == b"DYS\x01" or not next_part
 
-        return Mesh(tri_sets)
+        # DEBUG
+        pprint(fvtx_indices)
+        pprint((vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials))
+        
+        # Transform into flat, non-indexed data, 1:1 with face-vertices
+        vtx_data = perpendicular_slices(vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials)
+        fvtx_data = flatten_array(fvtx_indices, vtx_data)
+        positions, normals, colours, uvs, materials = perpendicular_slices(*fvtx_data, container_type=list)
+
+        return Mesh(positions, normals, colours, uvs, materials)
     
     def export_to_usd(self, filepath):
+        print(f"Exporting to USD: {filepath}".center(80, "="))
         # Create a new USD stage
         stage = Usd.Stage.CreateNew(filepath)
         
@@ -379,6 +435,7 @@ class Mesh:
 
     @classmethod
     def import_from_usd(cls, filepath):
+        print(f"Importing from USD: {filepath}".center(80, "="))
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
         default_prim = stage.GetDefaultPrim()
@@ -445,7 +502,7 @@ if __name__ == "__main__":
     basename, in_extension = os.path.splitext(in_path)
     if in_extension == ".rwm":
         with open(in_path, "rb") as in_file:
-            m = Mesh.read_from_rwm_file(in_file)
+            m = Mesh.read_from_rwm(in_file)
             m.export_to_usd(out_path)
     else:
         m = Mesh.import_from_usd(in_path)
