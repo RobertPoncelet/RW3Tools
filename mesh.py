@@ -109,6 +109,17 @@ def perpendicular_slices(*arrays, container_type=tuple):
         array_slices.append(container_type(a[i] for a in arrays))
     return array_slices
 
+def to_tri_array(fvtx_array):
+    tri_array = []
+    for i in range(0, len(fvtx_array), 3):
+        item = fvtx_array[i]
+        assert item == fvtx_array[i+1] == fvtx_array[i+2]
+        tri_array.append(item)
+    return tri_array
+
+def to_fvtx_array(tri_array):
+    return [[item] * 3 for item in tri_array]
+
 
 class Mesh:
     def __init__(self, positions, normals, colours, uvs, materials):
@@ -322,38 +333,28 @@ class Mesh:
         # Create a single mesh node for all submeshes
         mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
 
-        positions = []
-        normals = []
-        colours = []
-        uvs = []
+        # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
+        fvtx_p_indices, points = unflatten_array(self.positions)  # Now we have an index for each face-vertex which maps it to a *point*, NOT the same as above!
+        assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
+
+        tri_materials = to_tri_array(self.materials)
+        #tri_m_indices, materials = unflatten_array(tri_materials)
+        mat_to_tri_indices = inverse_index(tri_materials)
 
         # Create face sets for each material
-        start_face_index = 0
-        for tri_set in self.tri_sets:
-            face_indices = range(start_face_index, start_face_index + tri_set.num_tris())
-            start_face_index += tri_set.num_tris()
-            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, tri_set.material, "face", face_indices)
-
-            mat_normals = []
-
-            for pos, normal, colour, uv in tri_set.iterate_verts():
-                positions.append(pos)
-                normals.append(normal)
-                mat_normals.append(normal)
-                colours.append(colour)
-                uvs.append(uv)
-
-            print(f"export_to_usd {tri_set.material} normals: {mat_normals}")
+        for material, tri_indices in mat_to_tri_indices.items():
+            mat_name, spec_map, mat_colour = material
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, mat_name, "face", tri_indices)
 
             # Create a Material node under /Root/Materials/
-            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{tri_set.material}")
+            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{mat_name}")
 
             # Create a simple shader (you can extend this to support more complex material properties)
-            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{tri_set.material}/Principled_BSDF")
+            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{mat_name}/Principled_BSDF")
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
-            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*tri_set.colour[:3]))  # OwO
+            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*mat_colour[:3]))  # OwO
             shader_prim.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
             shader_prim.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
 
@@ -364,20 +365,18 @@ class Mesh:
             UsdShade.MaterialBindingAPI(geom_subset).Bind(material_prim)
 
         # Set vertex positions, normals, uvs, and face indices in the mesh
-        mesh_prim.GetPointsAttr().Set(positions)
-        mesh_prim.GetNormalsAttr().Set(normals)
-        total_num_verts = sum(ts.num_verts() for ts in self.tri_sets)
-        # TODO: this will need to be changed once we implement vertex sharing
-        all_indices = list(range(total_num_verts)) #reduce(lambda a, b: a + b, [ts.indices() for ts in self.tri_sets])
-        mesh_prim.GetFaceVertexIndicesAttr().Set(all_indices)
-        total_num_tris = sum(ts.num_tris() for ts in self.tri_sets)
-        mesh_prim.GetFaceVertexCountsAttr().Set([3] * total_num_tris)
+        mesh_prim.GetPointsAttr().Set(points)
+        mesh_prim.GetNormalsAttr().Set(self.normals)
+        mesh_prim.GetFaceVertexIndicesAttr().Set(fvtx_p_indices)
+        mesh_prim.GetFaceVertexCountsAttr().Set([3] * len(tri_materials))
 
         # Set UVs (texture coordinates) in a Primvar
         st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
                                                                   Sdf.ValueTypeNames.TexCoord2fArray,
                                                                   interpolation="faceVarying")
-        st_primvar.Set(uvs)
+        st_primvar.Set(self.uvs)
+
+        # TODO: do the same for colours
 
         # Save the stage
         stage.GetRootLayer().Save()
