@@ -124,6 +124,7 @@ def to_fvtx_array(tri_array):
 
 class Mesh:
     def __init__(self, positions, normals, colours, uvs, materials):
+        print("FLAT (constructor)".center(80, "="))
         pprint((positions, normals, colours, uvs, materials))
         # Let's do some sanity checks
         # These *should* all have 1 item per face-vertex
@@ -143,26 +144,37 @@ class Mesh:
         # Unflatten, grouped by material
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
         fvtx_data = perpendicular_slices(self.positions, self.normals, self.colours, self.uvs, self.materials)
+        fvtx_data = sorted(fvtx_data, key=lambda fvtx: fvtx[4])  # Sort by material, since they need to be contiguous
         fvtx_indices, vtx_data = unflatten_array(fvtx_data)  # Now we have an index for each face-vertex which maps it to a vertex
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
         vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
         
         # DEBUG
+        print("VERTICES".center(80, "="))
         pprint(fvtx_indices)
         pprint((vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials))
 
-        material_to_fvtxindices = defaultdict(list)
-        material_to_vertices = defaultdict(list)
-        for fvtx_index in fvtx_indices:
-            material = vtx_materials[fvtx_index]
-            vertex = vtx_data[fvtx_index]
-            material_to_fvtxindices[material].append(fvtx_index)
-            if vertex not in material_to_vertices[material]:
-                material_to_vertices[material].append(vertex)
+        all_materials = sorted(set(vtx_materials))  # We're relying on this producing the same material order as vtx_data
+        # Now we need to obtain the numbers of face-vertices and vertices for each material, in order
+        mats_fvtxis_vtxs = []
+        # This is gonna be slow (we could use iterators instead) but who cares
+        for m in all_materials:
+            mapping = (m, [], [])
+            for fvtx_index in fvtx_indices:
+                vertex = vtx_data[fvtx_index]
+                if vertex[4] == m:
+                    mapping[1].append(fvtx_index)
+            for vertex in vtx_data:
+                if vertex[4] == m:
+                    mapping[2].append(vertex)
+            mats_fvtxis_vtxs.append(mapping)
+        
+        print("MATERIAL TO FVTX INDICES AND VERTICES:")
+        pprint(mats_fvtxis_vtxs)
 
         f.write(b"MSH\x01")
         write_uint(f, 0)  # Number of locators
-        write_uint(f, len(material_to_fvtxindices))
+        write_uint(f, len(all_materials))
         write_uint(f, len(vtx_data))
         write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
         write_uint(f, 1)  # ???
@@ -180,7 +192,7 @@ class Mesh:
 
         # TODO: write locators here
 
-        for material in material_to_fvtxindices.keys():
+        for material in all_materials:
             mat_name, spec_map, mat_colour = material
             assert type(spec_map) is str
             write_string(f, mat_name)
@@ -190,9 +202,8 @@ class Mesh:
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for material, mat_fvtx_indices in material_to_fvtxindices.items():
+        for material, mat_fvtx_indices, vertices in mats_fvtxis_vtxs:
             write_uint(f, 0)
-            vertices = material_to_vertices[material]
             write_uint(f, len(vertices))
             for vertex in vertices:
                 position, normal, colour, uv, _ = vertex
@@ -230,7 +241,8 @@ class Mesh:
 
         materials = []
         for _ in range(num_materials):
-            mat_name = read_string(f) or "ERRORMATERIAL"
+            mat_name = read_string(f)
+            assert mat_name
             print(f"\nMaterial name: {mat_name}")
             spec_map = read_string(f)  # The specular map may be an empty string if not present
             print(f"Specular map: {spec_map or '<no spec map>'}")
@@ -445,7 +457,7 @@ class Mesh:
         normals = [tuple(n) for n in usd_normals]
         uvs = [tuple(uv) for uv in usd_uvs]
 
-        print("USD".center(80, "="))
+        print("FLAT".center(80, "="))
         pprint((positions, normals, colours, uvs, materials))
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(positions, normals, colours, uvs, materials)
