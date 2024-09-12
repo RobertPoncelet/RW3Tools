@@ -18,10 +18,13 @@ def to_compressed_path(path):
     return os.path.join(os.path.dirname(path), ".compressed", f"{os.path.basename(path)}.rnc")
 
 
-def compressed(path):
+def compressed(path, force=False):
     compressed_path = to_compressed_path(path)
-    if os.path.isfile(compressed_path) and os.path.getmtime(path) < os.path.getmtime(compressed_path):
-        return compressed_path
+    if (os.path.isfile(compressed_path)
+        and not force and os.path.getmtime(path) < os.path.getmtime(compressed_path)):
+            return compressed_path
+    
+    os.makedirs(os.path.dirname(compressed_path), exist_ok=True)
 
     print(f"Compressing {path}...")
     command = [
@@ -137,7 +140,7 @@ class IndexFileEntry:
         return cls(filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file)
     
     @classmethod
-    def should_compress(cls, path):
+    def should_pack_compressed(cls, path):
         if cls.exclude_list == None:
             exclude_list_path = os.path.join(os.path.dirname(path), "..", "Graphics", "noncomp.txt")
             print(exclude_list_path)
@@ -166,15 +169,15 @@ class IndexFileEntry:
         filename = os.path.basename(path)
         assert not filename.startswith(".")
 
-        should_compress = cls.should_compress(path)
+        should_pack_compressed = cls.should_pack_compressed(path)
         uncompressed_size = os.path.getsize(path)
-        compressed_size = os.path.getsize(compressed(path)) if should_compress else uncompressed_size
+        compressed_size = os.path.getsize(compressed(path)) if should_pack_compressed else uncompressed_size
 
         return IndexFileEntry(filename,
                               None,  # The offset is calculated later
                               uncompressed_size=uncompressed_size,
                               compressed_size=compressed_size,
-                              is_compressed=should_compress,
+                              is_compressed=should_pack_compressed,
                               is_ghost_file=False)
 
 
@@ -256,7 +259,9 @@ class IndexSection:
 
 
 class AssetIndex:
-    INDEX_HEADER = b'\xFC\xF5\x02\x00\x10\x00\x00\x00'
+    # NOTE: the game was crashing upon level load until I changed the third byte from 2 (the 
+    # original game's value) to 3. ¯\_(ツ)_/¯
+    INDEX_HEADER = b'\xFC\xF5\x03\x00\x10\x00\x00\x00'
 
     def __init__(self, sections=None):
         self.sections = sections or []
@@ -343,20 +348,23 @@ class AssetData:
                 'rnc_lib.exe', 'u', data_file_path, output_file_path, f'-i={entry.offset():X}'
             ]
             subprocess.check_call(command, stdout=subprocess.DEVNULL)
-            # Extract the file verbatim for caching
-            directly_extracted_path = to_compressed_path(output_file_path)
+            
+            # Previously we'd extract the file verbatim for caching purposes, but it seems there's
+            # a small discrepancy between the RNC compression used in the original game and that
+            # available to us now. Both read/write just fine, but the size difference of the 
+            # resulting files causes issues when repacking.
+            # directly_extracted_path = to_compressed_path(output_file_path)
         else:
-            directly_extracted_path = output_file_path
-
-        with open(data_file_path, "rb") as data_file:
-            data_file.seek(entry.offset())
-            with open(directly_extracted_path, "wb") as out_file:
-                out_file.write(data_file.read(entry.compressed_file_size()))
+            with open(data_file_path, "rb") as data_file:
+                data_file.seek(entry.offset())
+                with open(output_file_path, "wb") as out_file:
+                    out_file.write(data_file.read(entry.compressed_file_size()))
         print(f'Extracted {entry.filename} to {output_file_path}.')
 
-    def pack_files(self, asset_dir):
+    def pack_files(self, asset_dir, force_compress=False):
         with open(self.data_file_path, 'wb') as data_file:
             current_offset = 0
+            num_writes = 0
             for section in self.asset_index.sections:
                 section_dir = os.path.join(asset_dir, section.extracted_dir_name())
 
@@ -364,14 +372,22 @@ class AssetData:
                     input_file_path = os.path.join(section_dir, entry.filename)
 
                     if entry.is_compressed():
-                        input_file_path = compressed(input_file_path)
+                        input_file_path = compressed(input_file_path, force=force_compress)
 
                     with open(input_file_path, 'rb') as f:
                         packed_data = f.read()
 
                     current_offset = entry.write_packed_asset_to_data_file(packed_data, data_file, current_offset)
+                    num_writes += 1
 
                     print(f'Packed {entry.filename} to {self.data_file_path} at offset {entry.offset():X}.')
+
+        MAX_FILES_MAYBE = 5640
+        print(f"Packed {num_writes}/{MAX_FILES_MAYBE} files.")
+        if num_writes > MAX_FILES_MAYBE:
+            print(f"WARNING: over the limit of {MAX_FILES_MAYBE} files. "
+                  "If the game crashes on loading a level, this is probably why.\n"
+                  f"(This may not actually be true; see INDEX_HEADER in {__file__})")
 
     @classmethod
     def from_asset_dir(cls, asset_dir, data_file_path):
@@ -396,6 +412,7 @@ if __name__ == "__main__":
     pack_parser.add_argument("asset_dir", help="Directory containing assets to pack")
     pack_parser.add_argument("index_file", help="Path to save the index file (.idx)")
     pack_parser.add_argument("data_file", help="Path to save the data file (.dat)")
+    pack_parser.add_argument("--force-compress", required=False, action="store_true")
 
     args = parser.parse_args()
 
@@ -407,7 +424,7 @@ if __name__ == "__main__":
         print("Unpacking complete!")
     elif args.command == "pack":
         asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file)
-        asset_data.pack_files(args.asset_dir)
+        asset_data.pack_files(args.asset_dir, force_compress=args.force_compress)
         with open(args.index_file, 'wb') as f:
             asset_data.asset_index.write_to_file(f)
         print("Packing complete!")
