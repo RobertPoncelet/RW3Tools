@@ -124,8 +124,6 @@ def to_fvtx_array(tri_array):
 
 class Mesh:
     def __init__(self, positions, normals, colours, uvs, materials):
-        print("FLAT (constructor)".center(80, "="))
-        pprint((positions, normals, colours, uvs, materials))
         # Let's do some sanity checks
         # These *should* all have 1 item per face-vertex
         num = len(positions)
@@ -148,11 +146,6 @@ class Mesh:
         fvtx_indices, vtx_data = unflatten_array(fvtx_data)  # Now we have an index for each face-vertex which maps it to a vertex
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
         vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
-        
-        # DEBUG
-        print("VERTICES".center(80, "="))
-        pprint(fvtx_indices)
-        pprint((vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials))
 
         all_materials = sorted(set(vtx_materials))  # We're relying on this producing the same material order as vtx_data
         # Now we need to obtain the numbers of face-vertices and vertices for each material, in order
@@ -168,9 +161,6 @@ class Mesh:
                 if vertex[4] == m:
                     mapping[2].append(vertex)
             mats_fvtxis_vtxs.append(mapping)
-        
-        print("MATERIAL TO FVTX INDICES AND VERTICES:")
-        pprint(mats_fvtxis_vtxs)
 
         f.write(b"MSH\x01")
         write_uint(f, 0)  # Number of locators
@@ -282,11 +272,6 @@ class Mesh:
         next_part = f.read(4)
         print("Dynamics part", "follows" if next_part else "does NOT follow")
         assert next_part == b"DYS\x01" or not next_part
-
-        # DEBUG
-        print("VERTICES".center(80, "="))
-        pprint(fvtx_indices)
-        pprint((vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials))
         
         # Transform into flat, non-indexed data, 1:1 with face-vertices
         vtx_data = perpendicular_slices(vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials)
@@ -457,8 +442,6 @@ class Mesh:
         normals = [tuple(n) for n in usd_normals]
         uvs = [tuple(uv) for uv in usd_uvs]
 
-        print("FLAT".center(80, "="))
-        pprint((positions, normals, colours, uvs, materials))
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(positions, normals, colours, uvs, materials)
 
