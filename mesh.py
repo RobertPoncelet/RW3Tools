@@ -231,7 +231,7 @@ class Mesh:
 
         materials = []
         for _ in range(num_materials):
-            mat_name = read_string(f)
+            mat_name = read_string(f) #or "ERRORMATERIAL"
             assert mat_name
             print(f"\nMaterial name: {mat_name}")
             spec_map = read_string(f)  # The specular map may be an empty string if not present
@@ -250,7 +250,7 @@ class Mesh:
         vtx_uvs = []
         vtx_materials = []
 
-        for material in materials:  # Each material is a string
+        for material in materials:
             assert read_uint(f) == 0
             num_verts = read_uint(f)
             print(f"Number of vertices for this material ({material}): {num_verts}")
@@ -448,7 +448,7 @@ class Mesh:
 
 if __name__ == "__main__":
     in_path = sys.argv[1]
-    out_path = sys.argv[2]
+    out_path = sys.argv[2] if len(sys.argv) >= 3 else None
     print(f"Converting {in_path} => {out_path}".center(80, "="))
 
     basename, in_extension = os.path.splitext(in_path)
@@ -458,9 +458,10 @@ if __name__ == "__main__":
     else:
         m = Mesh.import_from_usd(in_path)
 
-    out_basename, out_extension = os.path.splitext(out_path)
-    if out_extension == ".rwm":
-        with open(out_path, "wb") as out_file:
-            m.write_to_rwm(out_file)
-    else:
-        m.export_to_usd(out_path)
+    if out_path:
+        out_basename, out_extension = os.path.splitext(out_path)
+        if out_extension == ".rwm":
+            with open(out_path, "wb") as out_file:
+                m.write_to_rwm(out_file)
+        else:
+            m.export_to_usd(out_path)
