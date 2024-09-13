@@ -1,11 +1,9 @@
-import sys, os, struct
-from functools import reduce
-from dataclasses import dataclass
+import argparse
+import os
+import struct
 from collections import defaultdict
-from pxr import Usd, UsdGeom, UsdShade, Gf, Sdf
-from pprint import pprint
-import json
 
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 # Read functions
 
@@ -83,11 +81,11 @@ def _write_multi(file, format, values):
 def flatten_array(indices, indexed_array):
     return [indexed_array[i] for i in indices]
 
-def unflatten_array(flat_array):
+def unflatten_array(flat_array, deduplicate=True):
     indexed_array = []
     indices = []
     for item in flat_array:
-        if item in indexed_array:
+        if item in indexed_array and deduplicate:
             indices.append(indexed_array.index(item))
         else:
             indexed_array.append(item)
@@ -237,7 +235,6 @@ class Mesh:
             spec_map = read_string(f)  # The specular map may be an empty string if not present
             print(f"Specular map: {spec_map or '<no spec map>'}")
             mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
-            mat_colour = (0.,) * 4  # TODO: remove when the debug shit is done
             print(f"Material colour(?): {mat_colour}")
             print(f"No idea: {read_float(f)}")
             print(f"Another number (flags?): {read_uint(f)}")
@@ -280,7 +277,7 @@ class Mesh:
 
         return Mesh(positions, normals, colours, uvs, materials)
     
-    def export_to_usd(self, filepath):
+    def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
         # Create a new USD stage
         stage = Usd.Stage.CreateNew(filepath)
@@ -292,7 +289,8 @@ class Mesh:
         mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_p_indices, points = unflatten_array(self.positions)  # Now we have an index for each face-vertex which maps it to a *point*, NOT the same as above!
+        fvtx_p_indices, points = unflatten_array(self.positions, deduplicate=merge_vertices)
+        # Now we have an index for each face-vertex which maps it to a *point* - NOT the same as RWM!
         assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
 
         tri_materials = to_tri_array(self.materials)
@@ -420,15 +418,12 @@ class Mesh:
         # Handle materials and tri sets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
         materials = [None] * len(usd_fvtx_indices)
-        for i, subset in enumerate(geom_subsets):
+        for subset in geom_subsets:
             tri_indices = subset.GetIndicesAttr().Get()
 
             mat_name = subset.GetPrim().GetName()  # Use the subset name as the material
             spec_map = ""  # TODO
-            r = [1., 0., 0., 1., 0.][i]
-            g = [0., 1., 0., 0., 1.][i]
-            b = [0., 0., 1., 0., 0.][i]
-            mat_colour = (0.,) * 4 #(r, g, b, 1.)  # TODO: proper colours
+            mat_colour = (1.,) * 4  # TODO: proper colours
             material = (mat_name, spec_map, mat_colour)
 
             for tri_index in tri_indices:
@@ -447,21 +442,28 @@ class Mesh:
 
 
 if __name__ == "__main__":
-    in_path = sys.argv[1]
-    out_path = sys.argv[2] if len(sys.argv) >= 3 else None
-    print(f"Converting {in_path} => {out_path}".center(80, "="))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("in_path", help="The mesh file to query or convert")
+    parser.add_argument("out_path", help="The path of the converted output file")
+    parser.add_argument("--merge-vertices", required=False, action="store_true",
+                        help="Deduplicate points in the output USD mesh. This uses less memory/"
+                        "storage, but may mess up normals on \"double-sided\" geometry where two "
+                        "faces use the same points.")
+    args = parser.parse_args()
 
-    basename, in_extension = os.path.splitext(in_path)
+    print(f"Converting {args.in_path} => {args.out_path}".center(80, "="))
+
+    basename, in_extension = os.path.splitext(args.in_path)
     if in_extension == ".rwm":
-        with open(in_path, "rb") as in_file:
+        with open(args.in_path, "rb") as in_file:
             m = Mesh.read_from_rwm(in_file)
     else:
-        m = Mesh.import_from_usd(in_path)
+        m = Mesh.import_from_usd(args.in_path)
 
-    if out_path:
-        out_basename, out_extension = os.path.splitext(out_path)
+    if args.out_path:
+        out_basename, out_extension = os.path.splitext(args.out_path)
         if out_extension == ".rwm":
-            with open(out_path, "wb") as out_file:
+            with open(args.out_path, "wb") as out_file:
                 m.write_to_rwm(out_file)
         else:
-            m.export_to_usd(out_path)
+            m.export_to_usd(args.out_path, merge_vertices=args.merge_vertices)

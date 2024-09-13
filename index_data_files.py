@@ -259,9 +259,9 @@ class IndexSection:
 
 
 class AssetIndex:
-    # NOTE: the game was crashing upon level load until I changed the third byte from 2 (the 
-    # original game's value) to 3. ¯\_(ツ)_/¯
-    INDEX_HEADER = b'\xFC\xF5\x03\x00\x10\x00\x00\x00'
+    # NOTE: with some custom files added, the game was crashing upon level load until I changed the
+    # third byte from 2 (the original game's value) to 3. ¯\_(ツ)_/¯
+    INDEX_HEADER = b"\xFC\xF5\x03\x00\x10\x00\x00\x00"
 
     def __init__(self, sections=None):
         self.sections = sections or []
