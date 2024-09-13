@@ -145,24 +145,19 @@ class Mesh:
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
         vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
 
-        all_materials = sorted(set(vtx_materials))  # We're relying on this producing the same material order as vtx_data
-        # Now we need to obtain the numbers of face-vertices and vertices for each material, in order
-        mats_fvtxis_vtxs = []
-        # This is gonna be slow (we could use iterators instead) but who cares
-        for m in all_materials:
-            mapping = (m, [], [])
-            for fvtx_index in fvtx_indices:
-                vertex = vtx_data[fvtx_index]
-                if vertex[4] == m:
-                    mapping[1].append(fvtx_index)
-            for vertex in vtx_data:
-                if vertex[4] == m:
-                    mapping[2].append(vertex)
-            mats_fvtxis_vtxs.append(mapping)
+        ordered_materials = sorted(set(vtx_materials))  # We're relying on this producing the same material order as vtx_data
+        # Now we need to obtain the numbers of face-vertices and vertices for each material
+        mat_to_fvtx_indices = defaultdict(list)
+        for fvtx_index in fvtx_indices:
+            material = vtx_data[fvtx_index][4]
+            mat_to_fvtx_indices[material].append(fvtx_index)
+        mat_to_vertices = defaultdict(list)
+        for vertex in vtx_data:
+            mat_to_vertices[vertex[4]].append(vertex)
 
         f.write(b"MSH\x01")
         write_uint(f, 0)  # Number of locators
-        write_uint(f, len(all_materials))
+        write_uint(f, len(ordered_materials))
         write_uint(f, len(vtx_data))
         write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
         write_uint(f, 1)  # ???
@@ -180,7 +175,7 @@ class Mesh:
 
         # TODO: write locators here
 
-        for material in all_materials:
+        for material in ordered_materials:
             mat_name, spec_map, mat_colour = material
             assert type(spec_map) is str
             write_string(f, mat_name)
@@ -190,16 +185,19 @@ class Mesh:
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for material, mat_fvtx_indices, vertices in mats_fvtxis_vtxs:
+        for material in ordered_materials:
+            mat_vertices = mat_to_vertices[material]
             write_uint(f, 0)
-            write_uint(f, len(vertices))
-            for vertex in vertices:
+            write_uint(f, len(mat_vertices))
+            for vertex in mat_vertices:
                 position, normal, colour, uv, _ = vertex
                 write_floats(f, position)
                 write_floats(f, normal)
                 assert len(colour) == 4
                 write_uchars(f, tuple(int(c*255) for c in colour))
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
+
+            mat_fvtx_indices = mat_to_fvtx_indices[material]
             write_uints(f, (1, 0))
             write_uint(f, len(mat_fvtx_indices) // 3)
             write_ushorts(f, mat_fvtx_indices)
@@ -281,12 +279,11 @@ class Mesh:
         print(f"Exporting to USD: {filepath}".center(80, "="))
         # Create a new USD stage
         stage = Usd.Stage.CreateNew(filepath)
-        
-        # Create the root Xform (transform) node for the mesh
-        root_prim = UsdGeom.Xform.Define(stage, "/Root")
+        stage.SetMetadata("upAxis", "Y")
 
-        # Create a single mesh node for all submeshes
-        mesh_prim = UsdGeom.Mesh.Define(stage, "/Root/Mesh")
+        # Create a single mesh node
+        name = os.path.splitext(os.path.basename(filepath))[0]
+        mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
         fvtx_p_indices, points = unflatten_array(self.positions, deduplicate=merge_vertices)
@@ -300,13 +297,14 @@ class Mesh:
         # Create face sets for each material
         for material, tri_indices in mat_to_tri_indices.items():
             mat_name, spec_map, mat_colour = material
-            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh_prim, mat_name, "face", tri_indices)
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices)
+            UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
 
             # Create a Material node under /Root/Materials/
-            material_prim = UsdShade.Material.Define(stage, f"/Root/Materials/{mat_name}")
+            material_prim = UsdShade.Material.Define(stage, f"/_materials/{mat_name}")
 
             # Create a simple shader (you can extend this to support more complex material properties)
-            shader_prim = UsdShade.Shader.Define(stage, f"/Root/Materials/{mat_name}/Principled_BSDF")
+            shader_prim = UsdShade.Shader.Define(stage, f"/_materials/{mat_name}/Principled_BSDF")
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
@@ -320,16 +318,18 @@ class Mesh:
             # Bind material to the mesh faces that use it
             UsdShade.MaterialBindingAPI(geom_subset).Bind(material_prim)
 
+        UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+
         # Set vertex positions, normals, uvs, and face indices in the mesh
-        mesh_prim.GetPointsAttr().Set(points)
-        mesh_prim.GetNormalsAttr().Set(self.normals)
-        mesh_prim.GetFaceVertexIndicesAttr().Set(fvtx_p_indices)
-        mesh_prim.GetFaceVertexCountsAttr().Set([3] * len(tri_materials))
+        mesh.GetPointsAttr().Set(points)
+        mesh.GetNormalsAttr().Set(self.normals)
+        mesh.GetFaceVertexIndicesAttr().Set(fvtx_p_indices)
+        mesh.GetFaceVertexCountsAttr().Set([3] * len(tri_materials))
 
         # Set UVs (texture coordinates) in a Primvar
-        st_primvar = UsdGeom.PrimvarsAPI(mesh_prim).CreatePrimvar("st",
-                                                                  Sdf.ValueTypeNames.TexCoord2fArray,
-                                                                  interpolation="faceVarying")
+        st_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st",
+                                                             Sdf.ValueTypeNames.TexCoord2fArray,
+                                                             interpolation="faceVarying")
         st_primvar.Set(self.uvs)
 
         # TODO: do the same for colours
@@ -403,14 +403,18 @@ class Mesh:
         else:
             # Search for any Mesh
             mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
+
         mesh = UsdGeom.Mesh(mesh_prim)
+        transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
         
-        usd_points = mesh.GetPointsAttr().Get()
+        usd_points = [transform.Transform(p) for p in mesh.GetPointsAttr().Get()]
         usd_fvtx_indices = mesh.GetFaceVertexIndicesAttr().Get()
-        usd_normals = mesh.GetNormalsAttr().Get()
+        usd_normals = [transform.TransformDir(n) for n in mesh.GetNormalsAttr().Get()]
         usd_uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
         assert len(usd_fvtx_indices) == len(usd_normals) == len(usd_uvs)
-        assert all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get())
+        if not all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get()):
+            raise RuntimeError("This script does not support faces with >3 vertices - please "
+                               "triangulate your mesh first.")
 
         positions = flatten_array(usd_fvtx_indices, usd_points)
         colours = [(1., 1., 1., 1.) for _ in usd_fvtx_indices]  # TODO
