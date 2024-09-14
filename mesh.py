@@ -2,6 +2,7 @@ import argparse
 import os
 import struct
 from collections import defaultdict
+from dataclasses import dataclass
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
@@ -121,31 +122,42 @@ def to_fvtx_array(tri_array):
 
 
 class Mesh:
-    def __init__(self, positions, normals, colours, uvs, materials):
-        # Let's do some sanity checks
-        # These *should* all have 1 item per face-vertex
-        num = len(positions)
-        assert num % 3 == 0
-        assert num == len(normals) == len(colours) == len(uvs) == len(materials)
-        to_tri_array(materials)
+    def __init__(self, face_vertices):
+        face_vertices.validate()
+        self._face_vertices = face_vertices
 
-        self.positions = positions
-        self.normals = normals
-        self.colours = colours
-        self.uvs = uvs
-        self.materials = materials
+    @dataclass
+    class FaceVertices:
+        positions: list[tuple]
+        normals: list[tuple]
+        colours: list[tuple]
+        uvs: list[tuple]
+        materials: list[tuple]
+
+        def validate(self):
+            # Let's do some sanity checks
+            # These *should* all have 1 item per face-vertex
+            num = len(self.positions)
+            assert num % 3 == 0
+            assert num == len(self.normals) == len(self.colours) == len(self.uvs) == len(self.materials)
+            to_tri_array(self.materials)
+        
+        def as_tuple(self):
+            return self.positions, self.normals, self.colours, self.uvs, self.materials
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
-        # Unflatten, grouped by material
-        # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_data = perpendicular_slices(self.positions, self.normals, self.colours, self.uvs, self.materials)
-        fvtx_data = sorted(fvtx_data, key=lambda fvtx: fvtx[4])  # Sort by material, since they need to be contiguous
-        fvtx_indices, vtx_data = unflatten_array(fvtx_data)  # Now we have an index for each face-vertex which maps it to a vertex
+        # We use "fvtx" or "vtx" to denote whether array items are per face-vertex or per vertex
+        fvtx_data = perpendicular_slices(*self._face_vertices.as_tuple())
+        # Sort by material, since they need to be contiguous
+        fvtx_data = sorted(fvtx_data, key=lambda fvtx: fvtx[4])
+        # Make an index for each face-vertex which maps it to a vertex
+        fvtx_indices, vtx_data = unflatten_array(fvtx_data)
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
         vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
 
-        ordered_materials = sorted(set(vtx_materials))  # We're relying on this producing the same material order as vtx_data
+        # We're relying on this producing the same material order as that of vtx_data
+        ordered_materials = sorted(set(vtx_materials))
         # Now we need to obtain the numbers of face-vertices and vertices for each material
         mat_to_fvtx_indices = defaultdict(list)
         for fvtx_index in fvtx_indices:
@@ -273,7 +285,7 @@ class Mesh:
         fvtx_data = flatten_array(fvtx_indices, vtx_data)
         positions, normals, colours, uvs, materials = perpendicular_slices(*fvtx_data, container_type=list)
 
-        return Mesh(positions, normals, colours, uvs, materials)
+        return Mesh(cls.FaceVertices(positions, normals, colours, uvs, materials))
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -286,11 +298,12 @@ class Mesh:
         mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_p_indices, points = unflatten_array(self.positions, deduplicate=merge_vertices)
+        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials = self._face_vertices.as_tuple()
+        fvtx_p_indices, points = unflatten_array(fvtx_positions, deduplicate=merge_vertices)
         # Now we have an index for each face-vertex which maps it to a *point* - NOT the same as RWM!
         assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
 
-        tri_materials = to_tri_array(self.materials)
+        tri_materials = to_tri_array(fvtx_materials)
         #tri_m_indices, materials = unflatten_array(tri_materials)
         mat_to_tri_indices = inverse_index(tri_materials)
 
@@ -322,7 +335,7 @@ class Mesh:
 
         # Set vertex positions, normals, uvs, and face indices in the mesh
         mesh.GetPointsAttr().Set(points)
-        mesh.GetNormalsAttr().Set(self.normals)
+        mesh.GetNormalsAttr().Set(fvtx_normals)
         mesh.GetFaceVertexIndicesAttr().Set(fvtx_p_indices)
         mesh.GetFaceVertexCountsAttr().Set([3] * len(tri_materials))
 
@@ -330,7 +343,7 @@ class Mesh:
         st_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st",
                                                              Sdf.ValueTypeNames.TexCoord2fArray,
                                                              interpolation="faceVarying")
-        st_primvar.Set(self.uvs)
+        st_primvar.Set(fvtx_uvs)
 
         # TODO: do the same for colours
 
@@ -396,7 +409,7 @@ class Mesh:
         return (mat_name, spec_map, mat_colour)
     
     @classmethod
-    def get_raw_geo(cls, mesh_prim):
+    def get_face_vertices(cls, mesh_prim):
         mesh = UsdGeom.Mesh(mesh_prim)
         transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
         
@@ -447,11 +460,11 @@ class Mesh:
         face_vertices = [], [], [], [], []
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
-                for i, fvtx_attribute_list in enumerate(cls.get_raw_geo(prim)):
+                for i, fvtx_attribute_list in enumerate(cls.get_face_vertices(prim)):
                     face_vertices[i].extend(fvtx_attribute_list)
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(*face_vertices)
+        return Mesh(cls.FaceVertices(*face_vertices))
 
 
 if __name__ == "__main__":
