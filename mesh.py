@@ -387,22 +387,21 @@ class Mesh:
 
         print(f"No texture found for material {material_prim.GetPath()}")
         return None
+    
+    @classmethod
+    def get_material(cls, material_prim):
+        mat_name = material_prim.GetName()
+        spec_map = ""  # TODO
+        mat_colour = (1.,) * 4  # TODO: proper colours
+        return (mat_name, spec_map, mat_colour)
 
     @classmethod
     def import_from_usd(cls, filepath):
         print(f"Importing from USD: {filepath}".center(80, "="))
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
-        default_prim = stage.GetDefaultPrim()
-        if default_prim:
-            # Check if it's the Mesh itself or the Mesh's parent
-            if default_prim.IsA(UsdGeom.Mesh):
-                mesh_prim = default_prim
-            else:
-                mesh_prim = next(p for p in default_prim.GetChildren() if p.IsA(UsdGeom.Mesh))
-        else:
-            # Search for any Mesh
-            mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
+        # TODO: merge all meshes into one
+        mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
 
         mesh = UsdGeom.Mesh(mesh_prim)
         transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
@@ -419,16 +418,18 @@ class Mesh:
         positions = flatten_array(usd_fvtx_indices, usd_points)
         colours = [(1., 1., 1., 1.) for _ in usd_fvtx_indices]  # TODO
 
-        # Handle materials and tri sets
+        # Handle materials
+        mat_api = UsdShade.MaterialBindingAPI(mesh_prim)
+        default_material_prim = mat_api.GetDirectBinding().GetMaterial().GetPrim()
+        default_material = cls.get_material(default_material_prim)
+        materials = [default_material] * len(usd_fvtx_indices)
+
+        # Override default material from subsets
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
-        materials = [None] * len(usd_fvtx_indices)
         for subset in geom_subsets:
             tri_indices = subset.GetIndicesAttr().Get()
 
-            mat_name = subset.GetPrim().GetName()  # Use the subset name as the material
-            spec_map = ""  # TODO
-            mat_colour = (1.,) * 4  # TODO: proper colours
-            material = (mat_name, spec_map, mat_colour)
+            material = cls.get_material(subset.GetPrim())
 
             for tri_index in tri_indices:
                 start = tri_index * 3
@@ -448,7 +449,7 @@ class Mesh:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("in_path", help="The mesh file to query or convert")
-    parser.add_argument("out_path", help="The path of the converted output file")
+    parser.add_argument("out_path", nargs="?", help="The path of the converted output file")
     parser.add_argument("--merge-vertices", required=False, action="store_true",
                         help="Deduplicate points in the output USD mesh. This uses less memory/"
                         "storage, but may mess up normals on \"double-sided\" geometry where two "
