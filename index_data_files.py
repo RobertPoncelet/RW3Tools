@@ -237,7 +237,7 @@ class IndexSection:
         return cls(section_name=section_name, entries=entries)
     
     @classmethod
-    def from_path(cls, asset_dir, section_name):
+    def from_path(cls, path, section_metadata):
         # Replicate the filename ordering of the original index file
         def filename_key(filename):
             filename = filename.lower().replace("_", "~")
@@ -249,14 +249,13 @@ class IndexSection:
                     return s
             return tuple(number_if_possible(p) for p in parts)
 
-        path = os.path.join(asset_dir, section_name)
         entries = []
         for filename in sorted(os.listdir(path), key=filename_key):
             filepath = os.path.join(path, filename)
             if not os.path.isfile(filepath) or filename.startswith("."):
                 continue
             entries.append(IndexFileEntry.from_path(filepath))
-        return cls(section_name, entries)
+        return cls(section_metadata["name"], entries)
 
 
 class AssetIndex:
@@ -283,14 +282,15 @@ class AssetIndex:
         return cls(sections=sections)
     
     @classmethod
-    def from_asset_dir(cls, asset_dir: str):
+    def from_asset_dir(cls, asset_dir):
+        with open(os.path.join(asset_dir, 'metadata.json'), 'r') as json_file:
+            metadata = json.load(json_file)
+
         sections = []
-        for section_name in os.listdir(asset_dir):
-            if section_name.startswith("."):
-                continue
-            section_path = os.path.join(asset_dir, section_name)
-            if os.path.isdir(section_path):
-                sections.append(IndexSection.from_path(asset_dir, section_name))
+        for section_metadata in metadata:
+            section_path = os.path.join(asset_dir, section_metadata["name"])
+            assert os.path.isdir(section_path)
+            sections.append(IndexSection.from_path(section_path, section_metadata))
 
         return cls(sections)
 
@@ -303,11 +303,15 @@ class AssetData:
     def extract_files(self, output_dir, only_section=None, only_filename=None):
         os.makedirs(output_dir, exist_ok=True)
 
+        sections_metadata = []
         tasks = []
+
         with open(self.data_file_path, "rb") as data_file:
             for section in self.asset_index.sections:
                 section_dir = os.path.join(output_dir, section.extracted_dir_name())
                 os.makedirs(section_dir, exist_ok=True)
+
+                entries_metadata = defaultdict(dict)
 
                 for entry in section.entries:
                     entry.update_from_data_file(data_file)
@@ -317,6 +321,20 @@ class AssetData:
                     do_file = entry.filename == only_filename or not only_filename
                     if do_section and do_file:
                         tasks.append((self.data_file_path, output_file_path, entry))
+
+                    # Collect metadata needed to reconstruct the idx file
+                    if entry.is_ghost_file():
+                        entries_metadata[entry.filename]["is_ghost_file"] = True
+                
+                section_item = {
+                    'name': section.extracted_dir_name(),
+                    'entries': entries_metadata
+                }
+                sections_metadata.append(section_item)
+
+        # Save metadata to JSON
+        with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
+            json.dump(sections_metadata, json_file, indent=4)
 
         # Run extraction tasks in parallel using multiprocessing
         with Pool(cpu_count()) as pool:
