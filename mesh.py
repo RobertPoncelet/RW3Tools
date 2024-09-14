@@ -394,15 +394,9 @@ class Mesh:
         spec_map = ""  # TODO
         mat_colour = (1.,) * 4  # TODO: proper colours
         return (mat_name, spec_map, mat_colour)
-
+    
     @classmethod
-    def import_from_usd(cls, filepath):
-        print(f"Importing from USD: {filepath}".center(80, "="))
-        # Load the USD stage
-        stage = Usd.Stage.Open(filepath)
-        # TODO: merge all meshes into one
-        mesh_prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
-
+    def get_raw_geo(cls, mesh_prim):
         mesh = UsdGeom.Mesh(mesh_prim)
         transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
         
@@ -442,8 +436,22 @@ class Mesh:
         normals = [tuple(n) for n in usd_normals]
         uvs = [tuple(uv) for uv in usd_uvs]
 
+        return positions, normals, colours, uvs, materials
+
+    @classmethod
+    def import_from_usd(cls, filepath):
+        print(f"Importing from USD: {filepath}".center(80, "="))
+        # Load the USD stage
+        stage = Usd.Stage.Open(filepath)
+
+        face_vertices = [], [], [], [], []
+        for prim in stage.Traverse():
+            if prim.IsA(UsdGeom.Mesh):
+                for i, fvtx_attribute_list in enumerate(cls.get_raw_geo(prim)):
+                    face_vertices[i].extend(fvtx_attribute_list)
+
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(positions, normals, colours, uvs, materials)
+        return Mesh(*face_vertices)
 
 
 if __name__ == "__main__":
