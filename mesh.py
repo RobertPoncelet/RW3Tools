@@ -3,6 +3,7 @@ import os
 import struct
 from collections import defaultdict
 from dataclasses import dataclass
+from pprint import pprint
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
@@ -122,9 +123,10 @@ def to_fvtx_array(tri_array):
 
 
 class Mesh:
-    def __init__(self, face_vertices):
+    def __init__(self, face_vertices, locators):
         face_vertices.validate()
         self._face_vertices = face_vertices
+        self._locators = locators
 
     @dataclass
     class FaceVertices:
@@ -168,7 +170,7 @@ class Mesh:
             mat_to_vertices[vertex[4]].append(vertex)
 
         f.write(b"MSH\x01")
-        write_uint(f, 0)  # Number of locators
+        write_uint(f, len(self._locators))
         write_uint(f, len(ordered_materials))
         write_uint(f, len(vtx_data))
         write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
@@ -185,7 +187,13 @@ class Mesh:
         write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
         write_float(f, 30.)  # Mass?
 
-        # TODO: write locators here
+        for loc_name, matrix in self._locators.items():
+            write_string(f, loc_name)
+            assert len(matrix) == 4
+            for vec in matrix:
+                assert len(vec) == 4
+                write_floats(f, vec)
+            write_uint(f, 0)  # Also dunno, flags?
 
         for material in ordered_materials:
             mat_name, spec_map, mat_colour = material
@@ -224,18 +232,20 @@ class Mesh:
         print(f"Number of materials: {num_materials}")
         print(f"Total number of verts: {read_uint(f)}")
         print(f"Total number of triangles: {read_uint(f)}")
-        print(f"A low number, but NOT the number of materials: {read_uint(f)}")
+        assert read_uint(f) == 1
         print(f"Bounding box min: {read_floats(f, 3)}")
         print(f"Bounding box max: {read_floats(f, 3)}")
         print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
         print(f"Something else (mass?): {read_float(f)}")
 
-        locators = []
+        locators = {}
         for _ in range(num_locators):
-            locator = read_string(f)
-            print(f"\nlocator: {locator}")
-            locators.append(locator)
-            f.read(0x44)  # Who cares
+            loc_name = read_string(f)
+            print(f"\nLocator: {loc_name}")
+            matrix = [list(read_floats(f, 4)) for _ in range(4)]
+            pprint(matrix)
+            locators[loc_name] = matrix
+            assert read_uint(f) == 0
 
         materials = []
         for _ in range(num_materials):
@@ -285,7 +295,7 @@ class Mesh:
         fvtx_data = flatten_array(fvtx_indices, vtx_data)
         positions, normals, colours, uvs, materials = perpendicular_slices(*fvtx_data, container_type=list)
 
-        return Mesh(cls.FaceVertices(positions, normals, colours, uvs, materials))
+        return Mesh(cls.FaceVertices(positions, normals, colours, uvs, materials), locators)
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -346,6 +356,13 @@ class Mesh:
         st_primvar.Set(fvtx_uvs)
 
         # TODO: do the same for colours
+
+        for loc_name, matrix in self._locators.items():
+            gf_matrix = Gf.Matrix4d(matrix)
+            xform_prim = UsdGeom.Xform.Define(stage, f'/{loc_name}')
+            xform = UsdGeom.Xform(xform_prim)
+            xform_op = xform.AddTransformOp()
+            xform_op.Set(gf_matrix)
 
         # Save the stage
         stage.GetRootLayer().Save()
@@ -458,13 +475,20 @@ class Mesh:
         stage = Usd.Stage.Open(filepath)
 
         face_vertices = [], [], [], [], []
+        locators = {}
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
                 for i, fvtx_attribute_list in enumerate(cls.get_face_vertices(prim)):
                     face_vertices[i].extend(fvtx_attribute_list)
+            
+            if prim.IsA(UsdGeom.Xform) and not prim.GetChildren():
+                loc_name = prim.GetName()
+                loc = UsdGeom.Xform(prim)
+                matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
+                locators[loc_name] = [vec for vec in matrix]
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(cls.FaceVertices(*face_vertices))
+        return Mesh(cls.FaceVertices(*face_vertices), locators)
 
 
 if __name__ == "__main__":
@@ -477,7 +501,7 @@ if __name__ == "__main__":
                         "faces use the same points.")
     args = parser.parse_args()
 
-    print(f"Converting {args.in_path} => {args.out_path}".center(80, "="))
+    print(f"Converting {args.in_path} -> {args.out_path}".center(80, "="))
 
     basename, in_extension = os.path.splitext(args.in_path)
     if in_extension == ".rwm":
