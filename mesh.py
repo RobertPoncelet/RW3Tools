@@ -228,18 +228,20 @@ class Mesh:
         header = f.read(4)
         mesh_type = header[:3].decode("ascii")
         version = int(header[-1])
-        assert mesh_type in ("MSH", "ARE")
+        assert mesh_type in ("MSH", "ARE", "SHL")
         print(f"{mesh_type} mesh type, version {version}")
         num_locators = read_uint(f)
         print(f"Number of locators: {num_locators}")
         num_materials = read_uint(f)
         print(f"Number of materials: {num_materials}")
-        print(f"Total number of verts: {read_uint(f)}")
-        print(f"Total number of triangles: {read_uint(f)}")
-        num_pieces = read_uint(f)
-        print(f"Total number of mesh pieces: {num_pieces}")
+        total_num_verts = read_uint(f)
+        print(f"Total number of verts: {total_num_verts}")
+        total_num_tris = read_uint(f)
+        print(f"Total number of triangles: {total_num_tris}")
+        total_num_pieces = read_uint(f)
+        print(f"Total number of mesh pieces: {total_num_pieces}")
         if mesh_type != "SHL":
-            assert num_pieces == 1
+            assert total_num_pieces == 1
         print(f"Bounding box min: {read_floats(f, 3)}")
         print(f"Bounding box max: {read_floats(f, 3)}")
         print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
@@ -279,8 +281,13 @@ class Mesh:
         vtx_uvs = []
         vtx_materials = []
 
+        piece_things = []
+
         for material in materials:
-            assert read_uint(f) == 0
+            num_piece_thingies = read_uint(f)
+            print(f"\nAnother piece thing ({hex(f.tell())}): {num_piece_thingies}")
+            if mesh_type != "SHL":
+                assert num_piece_thingies == 0
             num_verts = read_uint(f)
             print(f"Number of vertices for {material[0]}: {num_verts}")
 
@@ -292,12 +299,57 @@ class Mesh:
                 vtx_uvs.append((uv[0], -uv[1]))  # Flip V
                 vtx_materials.append(material)
 
-            assert read_uints(f, 2) == (1, 0)
+            piece_thing = read_uints(f, 2)
+            if mesh_type == "SHL":
+                print(f"Probably something to do with pieces ({hex(f.tell())}): {piece_thing}")
+                piece_things.append(piece_thing)
+            else:
+                assert piece_thing == (1, 0)
+
             num_tris = read_uint(f)
             print(f"Number of triangles: {num_tris}")
             fvtx_indices.extend(read_ushorts(f, num_tris*3))
+        
+            if mesh_type == "SHL":
+                for num_pieces, omitted_piece_id in piece_things:
+                    seen_ids = set()
+                    for _ in range(num_pieces-1):
+                        piece_id = read_uint(f)
+                        assert piece_id != omitted_piece_id
+                        seen_ids.add(piece_id)
+                        print(f"\nPiece ID: {piece_id}")
+                        num_piece_tris = read_uint(f)
+                        print(f"Number of triangles in this piece: {num_piece_tris}")
+                        piece_vtx_indices = read_ushorts(f, num_piece_tris * 3)
+                        assert all(idx < total_num_verts for idx in piece_vtx_indices)
+                    assert seen_ids == set(range(num_pieces)).difference({omitted_piece_id})
 
-        if mesh_type == "ARE":
+                    num_piece_verts = read_uint(f)
+                    for _ in range(num_piece_verts):
+                        piece_vtx_position = read_floats(f, 3)
+                        piece_vtx_normal = read_floats(f, 3)
+                        assert all(x <= 1. for x in piece_vtx_normal)
+
+                    num_bones, num_weights = read_uints(f, 2)
+                    print(f"Number of \"bones\": {num_bones}")
+                    print(f"Number of weights: {num_weights}")
+                    bone_set = set()
+                    for _ in range(num_piece_verts):
+                        bone1 = read_uint(f)
+                        bone_set.add(bone1)
+                        weight1 = read_float(f)
+                        bone2 = read_uint(f)
+                        bone_set.add(bone2)
+                        weight2 = read_float(f)
+                        assert 0. <= weight1 <= 1.
+                        assert 0. <= weight2 <= 1.
+                        assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
+                        print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
+                    assert bone_set == set(range(num_bones))
+                    for _ in range(num_bones * num_weights):
+                        print(read_floats(f, 10))
+
+        if mesh_type in ("ARE", "SHL"):
             num_sprite_types = read_uint(f)
             print(f"\nNumber of sprite types: {num_sprite_types}")
             # Since I've only found one example of a sprite type, I'm not sure if they're ordered
