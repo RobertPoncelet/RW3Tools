@@ -225,7 +225,7 @@ class Mesh:
     @classmethod
     def read_from_rwm(cls, f):
         print("Reading from RWM".center(80, "="))
-        assert f.read(4) == b"MSH\x01"
+        assert f.read(4) in (b"MSH\x01", b"ARE\x01")
         num_locators = read_uint(f)
         print(f"Number of locators: {num_locators}")
         num_materials = read_uint(f)
@@ -249,16 +249,23 @@ class Mesh:
 
         materials = []
         for _ in range(num_materials):
-            mat_name = read_string(f) #or "ERRORMATERIAL"
-            assert mat_name
-            print(f"\nMaterial name: {mat_name}")
-            spec_map = read_string(f)  # The specular map may be an empty string if not present
-            print(f"Specular map: {spec_map or '<no spec map>'}")
-            mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
-            print(f"Material colour(?): {mat_colour}")
-            print(f"No idea: {read_float(f)}")
-            print(f"Another number (flags?): {read_uint(f)}")
-            materials.append((mat_name, spec_map, mat_colour))
+            mat_name = read_string(f)
+            if True:#mat_name:
+                if mat_name:
+                    print(f"\nMaterial name: {mat_name}")
+                else:
+                    print(f"\nNAMELESS MATERIAL at {hex(f.tell())}")
+                spec_map = read_string(f)  # The specular map may be an empty string if not present
+                print(f"Specular map: {spec_map or '<no spec map>'}")
+                mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
+                print(f"Material colour(?): {mat_colour}")
+                print(f"No idea: {read_float(f)}")
+                print(f"Another number (flags?): {read_uint(f)}")
+                materials.append((mat_name, spec_map, mat_colour))
+            else:
+                print(f"\nNAMELESS MATERIAL at {hex(f.tell())}")
+                assert read_uint(f) == 0
+                materials.append(("", "", (0.) * 4))
 
         fvtx_indices = []
         vtx_positions = []
@@ -270,7 +277,7 @@ class Mesh:
         for material in materials:
             assert read_uint(f) == 0
             num_verts = read_uint(f)
-            print(f"Number of vertices for this material ({material}): {num_verts}")
+            print(f"Number of vertices for {material[0]}: {num_verts}")
 
             for _ in range(num_verts):
                 vtx_positions.append(read_floats(f, 3))
@@ -287,8 +294,10 @@ class Mesh:
 
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
-        print("Dynamics part", "follows" if next_part else "does NOT follow")
-        assert next_part == b"DYS\x01" or not next_part
+        if next_part == b"\x00" * 4:
+            next_part = f.read(4)
+        print(f"Following part: {next_part}")
+        assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
         
         # Transform into flat, non-indexed data, 1:1 with face-vertices
         vtx_data = perpendicular_slices(vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials)
