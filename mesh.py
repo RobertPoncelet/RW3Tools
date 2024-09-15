@@ -225,14 +225,21 @@ class Mesh:
     @classmethod
     def read_from_rwm(cls, f):
         print("Reading from RWM".center(80, "="))
-        assert f.read(4) in (b"MSH\x01", b"ARE\x01")
+        header = f.read(4)
+        mesh_type = header[:3].decode("ascii")
+        version = int(header[-1])
+        assert mesh_type in ("MSH", "ARE")
+        print(f"{mesh_type} mesh type, version {version}")
         num_locators = read_uint(f)
         print(f"Number of locators: {num_locators}")
         num_materials = read_uint(f)
         print(f"Number of materials: {num_materials}")
         print(f"Total number of verts: {read_uint(f)}")
         print(f"Total number of triangles: {read_uint(f)}")
-        assert read_uint(f) == 1
+        num_pieces = read_uint(f)
+        print(f"Total number of mesh pieces: {num_pieces}")
+        if mesh_type != "SHL":
+            assert num_pieces == 1
         print(f"Bounding box min: {read_floats(f, 3)}")
         print(f"Bounding box max: {read_floats(f, 3)}")
         print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
@@ -250,22 +257,20 @@ class Mesh:
         materials = []
         for _ in range(num_materials):
             mat_name = read_string(f)
-            if True:#mat_name:
-                if mat_name:
-                    print(f"\nMaterial name: {mat_name}")
-                else:
-                    print(f"\nNAMELESS MATERIAL at {hex(f.tell())}")
-                spec_map = read_string(f)  # The specular map may be an empty string if not present
-                print(f"Specular map: {spec_map or '<no spec map>'}")
-                mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
-                print(f"Material colour(?): {mat_colour}")
-                print(f"No idea: {read_float(f)}")
-                print(f"Another number (flags?): {read_uint(f)}")
-                materials.append((mat_name, spec_map, mat_colour))
+            if mat_name:
+                print(f"\nMaterial name: {mat_name}")
             else:
                 print(f"\nNAMELESS MATERIAL at {hex(f.tell())}")
-                assert read_uint(f) == 0
-                materials.append(("", "", (0.) * 4))
+            spec_map = read_string(f)  # The specular map may be an empty string if not present
+            print(f"Specular map: {spec_map or '<no spec map>'}")
+            mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
+            print(f"Material colour(?): {mat_colour}")
+            print(f"Specularity(?): {read_float(f)}")
+            flags = read_uint(f)
+            print(f"Flags: {flags}")
+            if flags & 0x20:
+                print(f"UV scrolling: {read_floats(f, 2)}")
+            materials.append((mat_name, spec_map, mat_colour))
 
         fvtx_indices = []
         vtx_positions = []
@@ -292,10 +297,23 @@ class Mesh:
             print(f"Number of triangles: {num_tris}")
             fvtx_indices.extend(read_ushorts(f, num_tris*3))
 
+        if mesh_type == "ARE":
+            num_sprite_types = read_uint(f)
+            print(f"\nNumber of sprite types: {num_sprite_types}")
+            # Since I've only found one example of a sprite type, I'm not sure if they're ordered
+            # as all sprite types followed by all sprites, or each array of sprites preceded by
+            # their sprite type
+            for _ in range(num_sprite_types):
+                print(f"Sprite type name: {read_string(f)}")
+                print(f"Some shit: {read_uints(f, 4)}")
+                num_sprites = read_uint(f)
+                print(f"Number of sprites of this type: {num_sprites}")
+                for _ in range(num_sprites):
+                    print(f"Sprite position: {read_floats(f, 3)}")
+                    print(f"Something else (radius?): {read_float(f)}")
+
         print(f"\nFinished at {hex(f.tell())}")
         next_part = f.read(4)
-        if next_part == b"\x00" * 4:
-            next_part = f.read(4)
         print(f"Following part: {next_part}")
         assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
         
