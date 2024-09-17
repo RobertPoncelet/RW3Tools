@@ -123,8 +123,10 @@ def to_fvtx_array(tri_array):
 
 
 class Mesh:
-    def __init__(self, face_vertices, locators):
+    def __init__(self, mesh_type, version, face_vertices, locators):
         face_vertices.validate()
+        self._mesh_type = mesh_type
+        self._version = version
         self._face_vertices = face_vertices
         self._locators = locators
 
@@ -169,7 +171,8 @@ class Mesh:
         for vertex in vtx_data:
             mat_to_vertices[vertex[4]].append(vertex)
 
-        f.write(b"MSH\x01")
+        f.write(self._mesh_type.encode("ascii"))
+        f.write(self._version)
         write_uint(f, len(self._locators))
         write_uint(f, len(ordered_materials))
         write_uint(f, len(vtx_data))
@@ -265,9 +268,7 @@ class Mesh:
         for _ in range(num_materials):
             mat_name = read_string(f)
             if mat_name:
-                print(f"\nMaterial name: {mat_name}")
-            else:
-                print(f"\nNAMELESS MATERIAL at {hex(f.tell())}")
+                print(f"\nMaterial name: {mat_name or '<no name>'}")
             spec_map = read_string(f)  # The specular map may be an empty string if not present
             print(f"Specular map: {spec_map or '<no spec map>'}")
             mat_colour = tuple(c / 255. for c in read_uchars(f, 4))
@@ -280,11 +281,19 @@ class Mesh:
             materials.append((mat_name, spec_map, mat_colour))
 
         fvtx_indices = []
+        fvtx_piece_ids = []
+
         vtx_positions = []
         vtx_normals = []
         vtx_colours = []
         vtx_uvs = []
         vtx_materials = []
+
+        vtx_dmg_positions = []
+        vtx_dmg_normals = []
+        vtx_weights = []
+
+        bone_stuff = []
 
         for material in materials:
             mesh_section_flags = read_uint(f)
@@ -311,20 +320,25 @@ class Mesh:
                 piece_id = read_uint(f)
                 num_tris = read_uint(f)
                 print(f"Number of triangles for {material[0]} piece {piece_id}: {num_tris}")
-                fvtx_indices.extend(read_ushorts(f, num_tris*3))
+                fvtx_indices.extend(read_ushorts(f, num_tris * 3))
+                fvtx_piece_ids.extend([piece_id] * num_tris * 3)
+
+        assert all(idx < total_num_verts for idx in fvtx_indices)
 
         if mesh_type == "SHL":
             num_dmg_verts = read_uint(f)
             print(f"\nNumber of alternate \"damage\" vertices: {num_dmg_verts}")
             assert num_dmg_verts == total_num_verts
             for _ in range(num_dmg_verts):
-                piece_vtx_position = read_floats(f, 3)
-                piece_vtx_normal = read_floats(f, 3)
-                assert all(-1 <= x <= 1. for x in piece_vtx_normal)
+                vtx_dmg_positions.append(read_floats(f, 3))
+                dmg_normal = read_floats(f, 3)
+                assert all(-1 <= x <= 1. for x in dmg_normal)
+                vtx_dmg_normals.append(dmg_normal)
 
             num_bones, num_weights = read_uints(f, 2)
             print(f"Number of \"bones\": {num_bones}")
             print(f"Number of weights: {num_weights}")
+            assert num_bones == 8
             assert num_weights == 2
             bone_set = set()
             for _ in range(num_dmg_verts):
@@ -337,14 +351,18 @@ class Mesh:
                 assert 0. <= weight1 <= 1.
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
-                #print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
+                print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
+                vtx_weights.append((bone1, weight1, bone2, weight2))
             assert bone_set == set(range(num_bones))
-            for _ in range(num_bones * num_weights):
-                #print(
-                read_floats(f, 10)  # No idea what this is yet
-                #)
-
-        assert all(idx < total_num_verts for idx in fvtx_indices)
+            for _ in range(num_bones):
+                bone_thing = []
+                for _ in range(3):
+                    bone_thing.append(read_floats(f, 3))
+                bone_thing.append(read_float(f))
+                for _ in range(3):
+                    bone_thing.append(read_floats(f, 3))
+                bone_thing.append(read_float(f))
+                bone_stuff.append(bone_thing)
 
         if mesh_type in ("ARE", "SHL"):
             num_sprite_types = read_uint(f)
@@ -371,8 +389,9 @@ class Mesh:
         vtx_data = perpendicular_slices(vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials)
         fvtx_data = flatten_array(fvtx_indices, vtx_data)
         positions, normals, colours, uvs, materials = perpendicular_slices(*fvtx_data, container_type=list)
+        face_vertices = cls.FaceVertices(positions, normals, colours, uvs, materials)
 
-        return Mesh(cls.FaceVertices(positions, normals, colours, uvs, materials), locators)
+        return Mesh(mesh_type, version, face_vertices, locators)
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -565,7 +584,7 @@ class Mesh:
                 locators[loc_name] = [vec for vec in matrix]
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh(cls.FaceVertices(*face_vertices), locators)
+        return Mesh("MSH", 1, cls.FaceVertices(*face_vertices), locators)
 
 
 if __name__ == "__main__":
