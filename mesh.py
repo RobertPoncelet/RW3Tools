@@ -138,6 +138,12 @@ class Mesh:
         uvs: list[tuple]
         materials: list[tuple]
 
+        dmg_positions: list[tuple]
+        dmg_normals: list[tuple]
+        weights: list[tuple]
+
+        piece_ids: list[int]
+
         def validate(self):
             # Let's do some sanity checks
             # These *should* all have 1 item per face-vertex
@@ -147,7 +153,10 @@ class Mesh:
             to_tri_array(self.materials)
         
         def as_tuple(self):
-            return self.positions, self.normals, self.colours, self.uvs, self.materials
+            if self.dmg_positions and self.dmg_normals and self.weights:
+                return self.positions, self.normals, self.colours, self.uvs, self.materials, self.dmg_positions, self.dmg_normals, self.weights, self.piece_ids
+            else:
+                return self.positions, self.normals, self.colours, self.uvs, self.materials, self.piece_ids
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
@@ -280,18 +289,8 @@ class Mesh:
                 print(f"UV scrolling: {read_floats(f, 2)}")
             materials.append((mat_name, spec_map, mat_colour))
 
-        fvtx_indices = []
-        fvtx_piece_ids = []
-
-        vtx_positions = []
-        vtx_normals = []
-        vtx_colours = []
-        vtx_uvs = []
-        vtx_materials = []
-
-        vtx_dmg_positions = []
-        vtx_dmg_normals = []
-        vtx_weights = []
+        fvtx_dict = defaultdict(list)
+        vtx_dict = defaultdict(list)
 
         bone_stuff = []
 
@@ -303,12 +302,12 @@ class Mesh:
                 print(f"{material[0]} is an rare one, because its flags are {hex(mesh_section_flags)}")
 
             for _ in range(num_verts):
-                vtx_positions.append(read_floats(f, 3))
-                vtx_normals.append(read_floats(f, 3))
-                vtx_colours.append(tuple(c / 255. for c in read_uchars(f, 4)))
+                vtx_dict["positions"].append(read_floats(f, 3))
+                vtx_dict["normals"].append(read_floats(f, 3))
+                vtx_dict["colours"].append(tuple(c / 255. for c in read_uchars(f, 4)))
                 uv = read_floats(f, 2)
-                vtx_uvs.append((uv[0], -uv[1]))  # Flip V
-                vtx_materials.append(material)
+                vtx_dict["uvs"].append((uv[0], -uv[1]))  # Flip V
+                vtx_dict["materials"].append(material)
 
             num_pieces = read_uint(f)
             if mesh_type == "SHL":
@@ -320,20 +319,20 @@ class Mesh:
                 piece_id = read_uint(f)
                 num_tris = read_uint(f)
                 print(f"Number of triangles for {material[0]} piece {piece_id}: {num_tris}")
-                fvtx_indices.extend(read_ushorts(f, num_tris * 3))
-                fvtx_piece_ids.extend([piece_id] * num_tris * 3)
+                fvtx_dict["indices"].extend(read_ushorts(f, num_tris * 3))
+                fvtx_dict["piece_ids"].extend([piece_id] * num_tris * 3)
 
-        assert all(idx < total_num_verts for idx in fvtx_indices)
+        assert all(idx < total_num_verts for idx in fvtx_dict["indices"])
 
         if mesh_type == "SHL":
             num_dmg_verts = read_uint(f)
             print(f"\nNumber of alternate \"damage\" vertices: {num_dmg_verts}")
             assert num_dmg_verts == total_num_verts
             for _ in range(num_dmg_verts):
-                vtx_dmg_positions.append(read_floats(f, 3))
+                vtx_dict["dmg_positions"].append(read_floats(f, 3))
                 dmg_normal = read_floats(f, 3)
                 assert all(-1 <= x <= 1. for x in dmg_normal)
-                vtx_dmg_normals.append(dmg_normal)
+                vtx_dict["dmg_normals"].append(dmg_normal)
 
             num_bones, num_weights = read_uints(f, 2)
             print(f"Number of \"bones\": {num_bones}")
@@ -352,17 +351,17 @@ class Mesh:
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
                 print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
-                vtx_weights.append((bone1, weight1, bone2, weight2))
+                vtx_dict["weights"].append((bone1, weight1, bone2, weight2))
             assert bone_set == set(range(num_bones))
             for _ in range(num_bones):
-                bone_thing = []
+                vectors = []
                 for _ in range(3):
-                    bone_thing.append(read_floats(f, 3))
-                bone_thing.append(read_float(f))
+                    vectors.append(read_floats(f, 3))
+                float1 = read_float(f)
                 for _ in range(3):
-                    bone_thing.append(read_floats(f, 3))
-                bone_thing.append(read_float(f))
-                bone_stuff.append(bone_thing)
+                    vectors.append(read_floats(f, 3))
+                float2 = read_float(f)
+                bone_stuff.append((vectors, float1, float2))
 
         if mesh_type in ("ARE", "SHL"):
             num_sprite_types = read_uint(f)
@@ -384,13 +383,22 @@ class Mesh:
         next_part = f.read(4)
         print(f"Following part: {next_part}")
         assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
+
+        if mesh_type == "SHL":
+            vtx_keys = ("positions", "normals", "colours", "uvs", "materials", "dmg_positions", "dmg_normals", "weights")
+        else:
+            vtx_keys = ("positions", "normals", "colours", "uvs", "materials")
+        assert set(vtx_dict.keys()) == set(vtx_keys)
+
+        fvtx_keys = vtx_keys + ("piece_ids",)
         
         # Transform into flat, non-indexed data, 1:1 with face-vertices
-        vtx_data = perpendicular_slices(vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials)
-        fvtx_data = flatten_array(fvtx_indices, vtx_data)
-        positions, normals, colours, uvs, materials = perpendicular_slices(*fvtx_data, container_type=list)
-        face_vertices = cls.FaceVertices(positions, normals, colours, uvs, materials)
-
+        # TODO: this is kinda unintuitive and needs refactoring
+        vtx_data = perpendicular_slices(*(vtx_dict[key] for key in vtx_keys))
+        fvtx_data = flatten_array(fvtx_dict["indices"], vtx_data)
+        fvtx_attribs = perpendicular_slices(*fvtx_data, container_type=list) + [fvtx_dict["piece_ids"]]
+        face_vertices = cls.FaceVertices(**dict(zip(fvtx_keys, fvtx_attribs)))
+    
         return Mesh(mesh_type, version, face_vertices, locators)
     
     def export_to_usd(self, filepath, merge_vertices=False):
@@ -404,7 +412,7 @@ class Mesh:
         mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials = self._face_vertices.as_tuple()
+        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials, _, _, _, _ = self._face_vertices.as_tuple()
         fvtx_p_indices, points = unflatten_array(fvtx_positions, deduplicate=merge_vertices)
         # Now we have an index for each face-vertex which maps it to a *point* - NOT the same as RWM!
         assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
