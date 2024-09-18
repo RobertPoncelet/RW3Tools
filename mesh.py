@@ -123,6 +123,8 @@ def to_fvtx_array(tri_array):
 
 
 class Mesh:
+    supported_types = "MSH", "ARE", "SHL"
+
     def __init__(self, mesh_type, version, face_vertices, locators):
         face_vertices.validate()
         self._mesh_type = mesh_type
@@ -167,7 +169,8 @@ class Mesh:
         # Make an index for each face-vertex which maps it to a vertex
         fvtx_indices, vtx_data = unflatten_array(fvtx_data)
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
-        vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials = perpendicular_slices(*vtx_data, container_type=list)
+        (vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials, vtx_dmg_positions, 
+         vtx_dmg_normals, vtx_weights, vtx_piece_ids) = perpendicular_slices(*vtx_data, container_type=list)
 
         # We're relying on this producing the same material order as that of vtx_data
         ordered_materials = sorted(set(vtx_materials))
@@ -241,10 +244,9 @@ class Mesh:
         mesh_type = header[:3].decode("ascii")
         version = int(header[-1])
         print(f"{mesh_type} mesh type, version {version}")
-        supported_types = "MSH", "ARE", "SHL"
-        if not mesh_type in supported_types:
+        if not mesh_type in cls.supported_types:
             raise RuntimeError(f"Unsupported mesh type \"{mesh_type}\"! "
-                               f"Currently, only {', '.join(supported_types)} are supported.")
+                               f"Currently, only {', '.join(cls.supported_types)} are supported.")
         num_locators = read_uint(f)
         print(f"Number of locators: {num_locators}")
         num_materials = read_uint(f)
@@ -603,9 +605,7 @@ if __name__ == "__main__":
                         help="Deduplicate points in the output USD mesh. This uses less memory/"
                         "storage, but may mess up normals on \"double-sided\" geometry where two "
                         "faces use the same points.")
-    args = parser.parse_args()
-
-    print(f"Converting {args.in_path} -> {args.out_path}".center(80, "="))
+    parser.add_argument("--mesh-type", default="MSH", choices=Mesh.supported_types)"="))
 
     basename, in_extension = os.path.splitext(args.in_path)
     if in_extension == ".rwm":
