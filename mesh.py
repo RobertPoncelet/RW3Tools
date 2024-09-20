@@ -248,42 +248,36 @@ class Mesh:
         
         def iterate_from(self, iterable):
             return Mesh.Geometry._GeoIterator(i for i in iterable)
-        
-        # Face-vertex can also be just a vertex
-        # TODO: remove these
-        def attrib_value(self, facevertex, attrib_name):
-            return facevertex[self.attrib_index(attrib_name)]
-        
-        def attrib_index(self, attrib_name):
-            return self._keys.index(attrib_name)
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
         # We use "fvtx" or "vtx" to denote whether array items are per face-vertex or per vertex
-        fvtx_data = self.geometry.elements().ordered_by("material")
+        #fvtx_data = list(self.geometry.elements().ordered_by("material"))
+        #vtx_data = list(self.geometry.iterate_from(vtx_data).unique_elements())
         # Make an index for each face-vertex which maps it to a vertex
-        fvtx_indices, vtx_data = unflatten_array(fvtx_data)
-        assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
+        # fvtx_indices, vtx_data = unflatten_array(fvtx_data)
+        # assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
 
         # We're relying on this producing the same material order as that of vtx_data
-        ordered_materials = list(self.geometry.elements().ordered_by("material").values_of("material").unique_elements())
+        ordered_materials = list(self.geometry.elements().values_of("material").unique_elements())
+
         # Now we need to obtain the numbers of face-vertices and vertices for each material
-        mat_to_fvtx_indices = defaultdict(list)
-        mat_index = self.geometry.attrib_index("material")
-        for fvtx_index in fvtx_indices:
-            material = vtx_data[fvtx_index][mat_index]
-            mat_to_fvtx_indices[material].append(fvtx_index)
-        mat_to_vertices = defaultdict(list)
-        for vertex in vtx_data:
-            material = vtx_data[fvtx_index][mat_index]
-            mat_to_vertices[material].append(vertex)
+        # mat_to_fvtx_indices = defaultdict(list)
+        # mat_index = self.geometry.attrib_index("material")
+        # for fvtx_index in fvtx_indices:
+        #     material = vtx_data[fvtx_index][mat_index]
+        #     mat_to_fvtx_indices[material].append(fvtx_index)
+        # mat_to_vertices = defaultdict(list)
+        # for vertex in vtx_data:
+        #     material = vtx_data[fvtx_index][mat_index]
+        #     mat_to_vertices[material].append(vertex)
 
         f.write(self._mesh_type.encode("ascii"))
         f.write(self._version)
         write_uint(f, len(self._locators))
         write_uint(f, len(ordered_materials))
-        write_uint(f, len(vtx_data))
-        write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
+        write_uint(f, self.geometry.elements().unique_elements().length()) # Number of vertices
+        write_uint(f, len(self.geometry) // 3)  # Number of triangles
         write_uint(f, 1)  # ???
 
         positions = set(self.geometry.attribute("position"))
@@ -316,27 +310,33 @@ class Mesh:
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for mat_vertices in self.geometry.elements().unique_elements().:
-            mat_vertices = mat_to_vertices[material]
+        vertices = lambda: self.geometry.elements().ordered_by("material").unique_elements()
+        for mat_vertices_iterator in vertices.split_by("material"):
+            mat_vertices = list(mat_vertices_iterator)
+            material = mat_vertices[0].attr("material")
             write_uint(f, 0)
             write_uint(f, len(mat_vertices))
             for vertex in mat_vertices:
-                write_floats(f, self.geometry.attrib_value(vertex, "position"))
-                write_floats(f, self.geometry.attrib_value(vertex, "normal"))
-                colour = self.geometry.attrib_value(vertex, "colour")
+                write_floats(f, vertex.attr("position"))
+                write_floats(f, vertex.attr("normal"))
+                colour = vertex.attr("colour")
                 assert len(colour) == 4
                 write_uchars(f, tuple(int(c*255) for c in colour))
-                uv = self.geometry.attrib_value(vertex, "uv")
+                uv = vertex.attr("uv")
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
 
-            mat_fvtx_indices = mat_to_fvtx_indices[material]
-            piece_ids = {self.geometry.attrib_value(v, "piece_id") for v in mat_vertices}
-            pidx = self.geometry.attrib_index("piece_id")
-            piece_fvtx_counts = {pid: len([fv for fv in mat_fvtx_indices if vtx_data[fv][pidx] == pid]) for pid in piece_ids}
-            num_pieces = len(piece_ids)
-            assert piece_ids == set(range(num_pieces))
+            # mat_fvtx_indices = mat_to_fvtx_indices[material]
+            # piece_ids = {v.attr("piece_id") for v in mat_vertices}
+            # pidx = self.geometry.attrib_index("piece_id")
+            # piece_fvtx_counts = {pid: len([fv for fv in mat_fvtx_indices if vtx_data[fv][pidx] == pid]) for pid in piece_ids}
+            # num_pieces = len(piece_ids)
+            # assert piece_ids == set(range(num_pieces))
+            
+            
             write_uint(f, num_pieces)
             for piece_id in range(num_pieces):
+                write_uint(f, piece_id)
+                mat_fvtx_indices = self.geometry.elements().indices_in(vertices())
                 write_uint(f, len(mat_fvtx_indices) // 3)
                 write_ushorts(f, mat_fvtx_indices)
 
