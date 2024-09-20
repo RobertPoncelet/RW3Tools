@@ -102,7 +102,7 @@ def inverse_index(flat_array):
     return mapping
 
 # Turn a tuple of arrays into an array of tuples, and vice versa
-def perpendicular_slices(*arrays, container_type=tuple):
+def transposed(*arrays, container_type=tuple):
     array_length = len(arrays[0])
     assert all(len(a) == array_length for a in arrays)
     array_slices = []
@@ -124,64 +124,159 @@ def to_fvtx_array(tri_array):
 
 class Mesh:
     supported_types = "MSH", "ARE", "SHL"
+    type_version_defaults = {
+        "MSH": 1,
+        "ARE": 1,
+        "SHL": 6
+    }
 
-    def __init__(self, mesh_type, version, face_vertices, locators):
-        face_vertices.validate()
+    def __init__(self, mesh_type, version, geometry, locators):
         self._mesh_type = mesh_type
         self._version = version
-        self._face_vertices = face_vertices
+        self.geometry = geometry
         self._locators = locators
 
-    @dataclass
-    class FaceVertices:
-        positions: list[tuple]
-        normals: list[tuple]
-        colours: list[tuple]
-        uvs: list[tuple]
-        materials: list[tuple]
+    class Geometry:
+        # TODO: I haven't implemented the below features yet, and I'm not even sure I need to
+        """Generic geometry class which stores arbitrary attributes per-face-vertex and can
+        format them before returning them, in the following ways:
+            * As-is (i.e. per-face-vertex), vs. indexed (i.e. indices mapping each face-vertex to
+              a corresponding vertex) vs. per-triangle
+            * Split by attribute and then vertex (tuple of arrays) vs. vertex and then attribute
+              (array of tuples)
+            * Ordered by a particular attribute
+        """
 
-        dmg_positions: list[tuple]
-        dmg_normals: list[tuple]
-        weights: list[tuple]
+        def __init__(self, **kwargs):
+            # NOTE: If you're using Python 3.6 or earlier, `kwargs` isn't guaranteed to provide the
+            # arguments in the correct order (though it probably will anyway)
+            if not kwargs:
+                raise ValueError("Can't make an empty Geometry")
+            self._dict = kwargs
+            self._keys = tuple(kwargs.keys())
+            self.validate()
 
-        piece_ids: list[int]
+        def __len__(self):
+            return len(self.as_attrib_tuple()[0])
 
         def validate(self):
             # Let's do some sanity checks
             # These *should* all have 1 item per face-vertex
-            num = len(self.positions)
+            num = len(self)
             assert num % 3 == 0
-            assert num == len(self.normals) == len(self.colours) == len(self.uvs) == len(self.materials)
-            to_tri_array(self.materials)
+            assert all(len(a) == num for a in self.as_attrib_tuple())
+
+        # NOTES FOR MYSELF:
+        # * Make everything an iterator if possible
+        # * Make vertices/face-vertices "elements" which are hashable/iterable but also support getting values by string key (subclass of tuple?)
+        # * as_elements -> unique_elements (vertices) -> indices
         
-        def as_tuple(self):
-            if self.dmg_positions and self.dmg_normals and self.weights:
-                return self.positions, self.normals, self.colours, self.uvs, self.materials, self.dmg_positions, self.dmg_normals, self.weights, self.piece_ids
-            else:
-                return self.positions, self.normals, self.colours, self.uvs, self.materials, self.piece_ids
+        class _GeoIterator:
+            def __init__(self, parent_iterator):
+                self._parent_iterator = parent_iterator
+            
+            def __iter__(self):
+                return iter(self._parent_iterator())
+            
+            @staticmethod
+            def chainable(method):
+                def wrapper(self, *args, **kwargs):
+                    def func():
+                        yield from method(self, *args, **kwargs)
+                    return Mesh.Geometry._GeoIterator(func)
+                return wrapper
+
+            @chainable
+            def unique_elements(self):
+                seen = set()
+                for element in self._parent_iterator:
+                    if element not in seen:
+                        seen.add(element)
+                        yield element
+            
+            @chainable
+            def indices_in(self, unique_elements):
+                unique_list = list(unique_elements)
+                for element in self._parent_iterator:
+                    yield unique_list.index(element)
+
+            @chainable
+            def values_of(self, attrib_name):
+                for element in self._parent_iterator:
+                    yield element.attr(attrib_name)
+            
+            @chainable
+            def ordered_by(self, attrib_name):
+                yield from sorted(self._parent_iterator, key=lambda e: e.attr(attrib_name))
+            
+            @chainable
+            def filtered_by(self, attrib_name, attrib_value):
+                for element in self._parent_iterator:
+                    if element.attr(attrib_name) == attrib_value:
+                        yield element
+            
+            @chainable
+            def split_by(self, attrib_name):
+                for unique_value in self.values_of(attrib_name).unique_elements():
+                    yield self.filtered_by(attrib_name, unique_value)
+
+            def length(self):
+                return len(list(self._parent_iterator))
+
+        class GeoElement(tuple):
+            def __new__(cls, attrib_names, iterable):
+                return super().__new__(cls, iterable)
+
+            def __init__(self, attrib_names, iterable):
+                self._attrib_names = attrib_names
+
+            def attr(self, key):
+                return self[self._attrib_names.index(key)]
+        
+        def attribute(self, attrib_name):
+            return self._dict[attrib_name]
+        
+        def element(self, index):
+            element_tuple = tuple(self.attribute(key)[index] for key in self._keys)
+            return Mesh.Geometry.GeoElement(self._keys, element_tuple)
+        
+        def as_attrib_tuple(self):
+            return tuple(self._dict[key] for key in self._keys)
+        
+        def elements(self):
+            return Mesh.Geometry._GeoIterator(self.element(i) for i in range(len(self)))
+        
+        def iterate_from(self, iterable):
+            return Mesh.Geometry._GeoIterator(i for i in iterable)
+        
+        # Face-vertex can also be just a vertex
+        # TODO: remove these
+        def attrib_value(self, facevertex, attrib_name):
+            return facevertex[self.attrib_index(attrib_name)]
+        
+        def attrib_index(self, attrib_name):
+            return self._keys.index(attrib_name)
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
         # We use "fvtx" or "vtx" to denote whether array items are per face-vertex or per vertex
-        fvtx_data = perpendicular_slices(*self._face_vertices.as_tuple())
-        # Sort by material, since they need to be contiguous
-        fvtx_data = sorted(fvtx_data, key=lambda fvtx: fvtx[4])
+        fvtx_data = self.geometry.elements().ordered_by("material")
         # Make an index for each face-vertex which maps it to a vertex
         fvtx_indices, vtx_data = unflatten_array(fvtx_data)
         assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
-        (vtx_positions, vtx_normals, vtx_colours, vtx_uvs, vtx_materials, vtx_dmg_positions, 
-         vtx_dmg_normals, vtx_weights, vtx_piece_ids) = perpendicular_slices(*vtx_data, container_type=list)
 
         # We're relying on this producing the same material order as that of vtx_data
-        ordered_materials = sorted(set(vtx_materials))
+        ordered_materials = list(self.geometry.elements().ordered_by("material").values_of("material").unique_elements())
         # Now we need to obtain the numbers of face-vertices and vertices for each material
         mat_to_fvtx_indices = defaultdict(list)
+        mat_index = self.geometry.attrib_index("material")
         for fvtx_index in fvtx_indices:
-            material = vtx_data[fvtx_index][4]
+            material = vtx_data[fvtx_index][mat_index]
             mat_to_fvtx_indices[material].append(fvtx_index)
         mat_to_vertices = defaultdict(list)
         for vertex in vtx_data:
-            mat_to_vertices[vertex[4]].append(vertex)
+            material = vtx_data[fvtx_index][mat_index]
+            mat_to_vertices[material].append(vertex)
 
         f.write(self._mesh_type.encode("ascii"))
         f.write(self._version)
@@ -191,12 +286,13 @@ class Mesh:
         write_uint(f, len(fvtx_indices) // 3)  # Number of triangles
         write_uint(f, 1)  # ???
 
-        minx = min(v[0] for v in vtx_positions)
-        miny = min(v[1] for v in vtx_positions)
-        minz = min(v[2] for v in vtx_positions)
-        maxx = max(v[0] for v in vtx_positions)
-        maxy = max(v[1] for v in vtx_positions)
-        maxz = max(v[2] for v in vtx_positions)
+        positions = set(self.geometry.attribute("position"))
+        minx = min(v[0] for v in positions)
+        miny = min(v[1] for v in positions)
+        minz = min(v[2] for v in positions)
+        maxx = max(v[0] for v in positions)
+        maxy = max(v[1] for v in positions)
+        maxz = max(v[2] for v in positions)
         write_floats(f, (minx, miny, minz))
         write_floats(f, (maxx, maxy, maxz))
         write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
@@ -220,22 +316,29 @@ class Mesh:
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
         
-        for material in ordered_materials:
+        for mat_vertices in self.geometry.elements().unique_elements().:
             mat_vertices = mat_to_vertices[material]
             write_uint(f, 0)
             write_uint(f, len(mat_vertices))
             for vertex in mat_vertices:
-                position, normal, colour, uv, _ = vertex
-                write_floats(f, position)
-                write_floats(f, normal)
+                write_floats(f, self.geometry.attrib_value(vertex, "position"))
+                write_floats(f, self.geometry.attrib_value(vertex, "normal"))
+                colour = self.geometry.attrib_value(vertex, "colour")
                 assert len(colour) == 4
                 write_uchars(f, tuple(int(c*255) for c in colour))
+                uv = self.geometry.attrib_value(vertex, "uv")
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
 
             mat_fvtx_indices = mat_to_fvtx_indices[material]
-            write_uints(f, (1, 0))
-            write_uint(f, len(mat_fvtx_indices) // 3)
-            write_ushorts(f, mat_fvtx_indices)
+            piece_ids = {self.geometry.attrib_value(v, "piece_id") for v in mat_vertices}
+            pidx = self.geometry.attrib_index("piece_id")
+            piece_fvtx_counts = {pid: len([fv for fv in mat_fvtx_indices if vtx_data[fv][pidx] == pid]) for pid in piece_ids}
+            num_pieces = len(piece_ids)
+            assert piece_ids == set(range(num_pieces))
+            write_uint(f, num_pieces)
+            for piece_id in range(num_pieces):
+                write_uint(f, len(mat_fvtx_indices) // 3)
+                write_ushorts(f, mat_fvtx_indices)
 
     @classmethod
     def read_from_rwm(cls, f):
@@ -294,8 +397,6 @@ class Mesh:
         fvtx_dict = defaultdict(list)
         vtx_dict = defaultdict(list)
 
-        bone_stuff = []
-
         for material in materials:
             mesh_section_flags = read_uint(f)
             num_verts = read_uint(f)
@@ -304,12 +405,12 @@ class Mesh:
                 print(f"{material[0]} is an rare one, because its flags are {hex(mesh_section_flags)}")
 
             for _ in range(num_verts):
-                vtx_dict["positions"].append(read_floats(f, 3))
-                vtx_dict["normals"].append(read_floats(f, 3))
-                vtx_dict["colours"].append(tuple(c / 255. for c in read_uchars(f, 4)))
+                vtx_dict["position"].append(read_floats(f, 3))
+                vtx_dict["normal"].append(read_floats(f, 3))
+                vtx_dict["colour"].append(tuple(c / 255. for c in read_uchars(f, 4)))
                 uv = read_floats(f, 2)
-                vtx_dict["uvs"].append((uv[0], -uv[1]))  # Flip V
-                vtx_dict["materials"].append(material)
+                vtx_dict["uv"].append((uv[0], -uv[1]))  # Flip V
+                vtx_dict["material"].append(material)
 
             num_pieces = read_uint(f)
             if mesh_type == "SHL":
@@ -327,14 +428,15 @@ class Mesh:
         assert all(idx < total_num_verts for idx in fvtx_dict["indices"])
 
         if mesh_type == "SHL":
+            bone_stuff = []
             num_dmg_verts = read_uint(f)
             print(f"\nNumber of alternate \"damage\" vertices: {num_dmg_verts}")
             assert num_dmg_verts == total_num_verts
             for _ in range(num_dmg_verts):
-                vtx_dict["dmg_positions"].append(read_floats(f, 3))
+                vtx_dict["dmg_position"].append(read_floats(f, 3))
                 dmg_normal = read_floats(f, 3)
                 assert all(-1 <= x <= 1. for x in dmg_normal)
-                vtx_dict["dmg_normals"].append(dmg_normal)
+                vtx_dict["dmg_normal"].append(dmg_normal)
 
             num_bones, num_weights = read_uints(f, 2)
             print(f"Number of \"bones\": {num_bones}")
@@ -353,7 +455,7 @@ class Mesh:
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
                 print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
-                vtx_dict["weights"].append((bone1, weight1, bone2, weight2))
+                vtx_dict["weight"].append((bone1, weight1, bone2, weight2))
             assert bone_set == set(range(num_bones))
             for _ in range(num_bones):
                 vectors = []
@@ -387,19 +489,19 @@ class Mesh:
         assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
 
         if mesh_type == "SHL":
-            vtx_keys = ("positions", "normals", "colours", "uvs", "materials", "dmg_positions", "dmg_normals", "weights")
+            vtx_keys = ("position", "normal", "colour", "uv", "material", "dmg_position", "dmg_normal", "weight")
         else:
-            vtx_keys = ("positions", "normals", "colours", "uvs", "materials")
+            vtx_keys = ("position", "normal", "colour", "uv", "material")
         assert set(vtx_dict.keys()) == set(vtx_keys)
 
         fvtx_keys = vtx_keys + ("piece_ids",)
         
         # Transform into flat, non-indexed data, 1:1 with face-vertices
         # TODO: this is kinda unintuitive and needs refactoring
-        vtx_data = perpendicular_slices(*(vtx_dict[key] for key in vtx_keys))
+        vtx_data = transposed(*(vtx_dict[key] for key in vtx_keys))
         fvtx_data = flatten_array(fvtx_dict["indices"], vtx_data)
-        fvtx_attribs = perpendicular_slices(*fvtx_data, container_type=list) + [fvtx_dict["piece_ids"]]
-        face_vertices = cls.FaceVertices(**dict(zip(fvtx_keys, fvtx_attribs)))
+        fvtx_attribs = transposed(*fvtx_data, container_type=list) + [fvtx_dict["piece_ids"]]
+        face_vertices = cls.Geometry(**dict(zip(fvtx_keys, fvtx_attribs)))
     
         return Mesh(mesh_type, version, face_vertices, locators)
     
@@ -414,7 +516,7 @@ class Mesh:
         mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials, _, _, _, _ = self._face_vertices.as_tuple()
+        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials, _, _, _, _ = self.geometry.as_tuple()
         fvtx_p_indices, points = unflatten_array(fvtx_positions, deduplicate=merge_vertices)
         # Now we have an index for each face-vertex which maps it to a *point* - NOT the same as RWM!
         assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
@@ -532,7 +634,7 @@ class Mesh:
         return (mat_name, spec_map, mat_colour)
     
     @classmethod
-    def get_face_vertices(cls, mesh_prim):
+    def get_geometry(cls, mesh_prim):
         mesh = UsdGeom.Mesh(mesh_prim)
         transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
         
@@ -572,19 +674,25 @@ class Mesh:
         normals = [tuple(n) for n in usd_normals]
         uvs = [tuple(uv) for uv in usd_uvs]
 
-        return positions, normals, colours, uvs, materials
+        # TODO: do these properly
+        dmg_positions = positions.copy()
+        dmg_normals = normals.copy()
+        weights = [(0, 0.5, 1, 0.5) for _ in positions]
+        piece_ids = [0 for _ in positions]
+
+        return positions, normals, colours, uvs, materials, dmg_positions, dmg_normals, weights, piece_ids
 
     @classmethod
-    def import_from_usd(cls, filepath):
+    def import_from_usd(cls, filepath, mesh_type="MSH"):
         print(f"Importing from USD: {filepath}".center(80, "="))
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
 
-        face_vertices = [], [], [], [], []
+        face_vertices = [], [], [], [], [], [], [], [], []
         locators = {}
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
-                for i, fvtx_attribute_list in enumerate(cls.get_face_vertices(prim)):
+                for i, fvtx_attribute_list in enumerate(cls.get_geometry(prim)):
                     face_vertices[i].extend(fvtx_attribute_list)
             
             if prim.IsA(UsdGeom.Xform) and not prim.GetChildren():
@@ -594,25 +702,28 @@ class Mesh:
                 locators[loc_name] = [vec for vec in matrix]
 
         print(f"Mesh successfully imported from USD: {filepath}")
-        return Mesh("MSH", 1, cls.FaceVertices(*face_vertices), locators)
+        return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
+                    cls.Geometry(*face_vertices), locators)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("in_path", help="The mesh file to query or convert")
     parser.add_argument("out_path", nargs="?", help="The path of the converted output file")
+    parser.add_argument("--mesh-type", default="MSH", choices=Mesh.supported_types, help="Mesh "
+                        "type to assume when converting from USD.")
     parser.add_argument("--merge-vertices", required=False, action="store_true",
                         help="Deduplicate points in the output USD mesh. This uses less memory/"
                         "storage, but may mess up normals on \"double-sided\" geometry where two "
                         "faces use the same points.")
-    parser.add_argument("--mesh-type", default="MSH", choices=Mesh.supported_types)"="))
+    args = parser.parse_args()
 
     basename, in_extension = os.path.splitext(args.in_path)
     if in_extension == ".rwm":
         with open(args.in_path, "rb") as in_file:
             m = Mesh.read_from_rwm(in_file)
     else:
-        m = Mesh.import_from_usd(args.in_path)
+        m = Mesh.import_from_usd(args.in_path, args.mesh_type)
 
     if args.out_path:
         out_basename, out_extension = os.path.splitext(args.out_path)
