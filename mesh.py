@@ -1,8 +1,8 @@
 import argparse
+import itertools
 import os
 import struct
 from collections import defaultdict
-from dataclasses import dataclass
 from pprint import pprint
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
@@ -67,6 +67,9 @@ def write_floats(file, values):
 
 def write_ushorts(file, values):
     _write_multi(file, "H", values)
+
+def write_uchar(file, value):
+    _write_single(file, "B", value)
 
 def write_uchars(file, values):
     _write_multi(file, "B", values)
@@ -166,30 +169,52 @@ class Mesh:
             assert num % 3 == 0
             assert all(len(a) == num for a in self.as_attrib_tuple())
 
+        def merge(self, other_geo):
+            assert other_geo._keys == self._keys
+            for key in self._keys:
+                self._dict[key].extend(other_geo._dict[key])
+
         # NOTES FOR MYSELF:
         # * Make everything an iterator if possible
         # * Make vertices/face-vertices "elements" which are hashable/iterable but also support getting values by string key (subclass of tuple?)
         # * as_elements -> unique_elements (vertices) -> indices
         
         class _GeoIterator:
-            def __init__(self, parent_iterator):
+            def __init__(self, parent_iterator, original_callable=None):
                 self._parent_iterator = parent_iterator
+                self._original_callable = original_callable
             
+            # Originally this just returned `iter(self._parent_iterator)`, but it got annoying
+            # having to make a new GeoIterator every time because the parent one got exhausted,
+            # so instead let's just make a copy here.
+            # Apparently this isn't very memory-efficient, but... who cares
             def __iter__(self):
-                return iter(self._parent_iterator())
-            
+                if self._original_callable:
+                    ret = self._original_callable()
+                    return ret
+                iter1, iter2 = itertools.tee(self._parent_iterator)
+                self._parent_iterator = iter1  # The original won't be valid anymore
+                return iter2
+
+            def __len__(self):
+                if self._original_callable:
+                    return len(list(self._original_callable()))
+                iter1, iter2 = itertools.tee(self._parent_iterator)
+                self._parent_iterator = iter1  # The original won't be valid anymore
+                return len(list(iter2))
+        
             @staticmethod
             def chainable(method):
                 def wrapper(self, *args, **kwargs):
                     def func():
                         yield from method(self, *args, **kwargs)
-                    return Mesh.Geometry._GeoIterator(func)
+                    return Mesh.Geometry._GeoIterator(func())
                 return wrapper
 
             @chainable
             def unique_elements(self):
                 seen = set()
-                for element in self._parent_iterator:
+                for element in self:
                     if element not in seen:
                         seen.add(element)
                         yield element
@@ -197,31 +222,28 @@ class Mesh:
             @chainable
             def indices_in(self, unique_elements):
                 unique_list = list(unique_elements)
-                for element in self._parent_iterator:
+                for element in self:
                     yield unique_list.index(element)
 
             @chainable
             def values_of(self, attrib_name):
-                for element in self._parent_iterator:
+                for element in self:
                     yield element.attr(attrib_name)
             
             @chainable
             def ordered_by(self, attrib_name):
-                yield from sorted(self._parent_iterator, key=lambda e: e.attr(attrib_name))
+                yield from sorted(self, key=lambda e: e.attr(attrib_name))
             
             @chainable
             def filtered_by(self, attrib_name, attrib_value):
-                for element in self._parent_iterator:
+                for element in self:
                     if element.attr(attrib_name) == attrib_value:
                         yield element
             
             @chainable
             def split_by(self, attrib_name):
                 for unique_value in self.values_of(attrib_name).unique_elements():
-                    yield self.filtered_by(attrib_name, unique_value)
-
-            def length(self):
-                return len(list(self._parent_iterator))
+                    yield unique_value, self.filtered_by(attrib_name, unique_value)
 
         class GeoElement(tuple):
             def __new__(cls, attrib_names, iterable):
@@ -244,10 +266,10 @@ class Mesh:
             return tuple(self._dict[key] for key in self._keys)
         
         def elements(self):
-            return Mesh.Geometry._GeoIterator(self.element(i) for i in range(len(self)))
+            return Mesh.Geometry._GeoIterator(None, lambda: (self.element(i) for i in range(len(self))))
         
         def iterate_from(self, iterable):
-            return Mesh.Geometry._GeoIterator(i for i in iterable)
+            return Mesh.Geometry._GeoIterator(None, lambda: (i for i in iterable))
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
@@ -259,7 +281,9 @@ class Mesh:
         # assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
 
         # We're relying on this producing the same material order as that of vtx_data
-        ordered_materials = list(self.geometry.elements().values_of("material").unique_elements())
+        elements = self.geometry.elements()
+        materials = elements.values_of("material")
+        ordered_materials = sorted(set(materials))
 
         # Now we need to obtain the numbers of face-vertices and vertices for each material
         # mat_to_fvtx_indices = defaultdict(list)
@@ -273,12 +297,12 @@ class Mesh:
         #     mat_to_vertices[material].append(vertex)
 
         f.write(self._mesh_type.encode("ascii"))
-        f.write(self._version)
+        write_uchar(f, self._version)
         write_uint(f, len(self._locators))
         write_uint(f, len(ordered_materials))
-        write_uint(f, self.geometry.elements().unique_elements().length()) # Number of vertices
+        write_uint(f, len(self.geometry.elements().unique_elements())) # Number of vertices
         write_uint(f, len(self.geometry) // 3)  # Number of triangles
-        write_uint(f, 1)  # ???
+        write_uint(f, len(self.geometry.elements().values_of("piece_id").unique_elements()))  # Number of pieces
 
         positions = set(self.geometry.attribute("position"))
         minx = min(v[0] for v in positions)
@@ -309,14 +333,16 @@ class Mesh:
             write_uchars(f, tuple(int(c*255) for c in mat_colour))
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
-        
-        vertices = lambda: self.geometry.elements().ordered_by("material").unique_elements()
-        for mat_vertices_iterator in vertices.split_by("material"):
-            mat_vertices = list(mat_vertices_iterator)
-            material = mat_vertices[0].attr("material")
-            write_uint(f, 0)
+
+        face_vertices = self.geometry.elements().ordered_by("material")
+        vertices = face_vertices.unique_elements()
+        for material, mat_facevertices in face_vertices.split_by("material"):
+            #print("iterating material")
+            write_uint(f, 0)  # Flags
+            mat_vertices = mat_facevertices.unique_elements()
             write_uint(f, len(mat_vertices))
             for vertex in mat_vertices:
+                #print("iterating vertex")
                 write_floats(f, vertex.attr("position"))
                 write_floats(f, vertex.attr("normal"))
                 colour = vertex.attr("colour")
@@ -332,13 +358,20 @@ class Mesh:
             # num_pieces = len(piece_ids)
             # assert piece_ids == set(range(num_pieces))
             
-            
-            write_uint(f, num_pieces)
-            for piece_id in range(num_pieces):
+            mat_piece_facevertices = mat_facevertices.split_by("piece_id")
+            num_fvtxs = len(mat_piece_facevertices)
+            print("wrote", num_fvtxs)
+            write_uint(f, num_fvtxs)  # Number of pieces
+            for piece_id, facevertices_to_write in mat_piece_facevertices:
+                print("iterating face-vertex")
                 write_uint(f, piece_id)
-                mat_fvtx_indices = self.geometry.elements().indices_in(vertices())
-                write_uint(f, len(mat_fvtx_indices) // 3)
-                write_ushorts(f, mat_fvtx_indices)
+                num_fvtxs = len(facevertices_to_write)
+                assert num_fvtxs % 3 == 0
+                write_uint(f, num_fvtxs // 3)
+                indices = facevertices_to_write.indices_in(vertices)
+                write_ushorts(f, indices)
+        
+        # TODO: SHL mesh shit
 
     @classmethod
     def read_from_rwm(cls, f):
@@ -680,7 +713,17 @@ class Mesh:
         weights = [(0, 0.5, 1, 0.5) for _ in positions]
         piece_ids = [0 for _ in positions]
 
-        return positions, normals, colours, uvs, materials, dmg_positions, dmg_normals, weights, piece_ids
+        return Mesh.Geometry(
+            position=positions,
+            normal=normals,
+            colour=colours,
+            uv=uvs,
+            material=materials,
+            #dmg_position=dmg_positions,
+            #dmg_normal=dmg_normals,
+            #weight=weights,
+            piece_id=piece_ids
+        )
 
     @classmethod
     def import_from_usd(cls, filepath, mesh_type="MSH"):
@@ -688,12 +731,32 @@ class Mesh:
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
 
-        face_vertices = [], [], [], [], [], [], [], [], []
+        if mesh_type == "MSH":
+            geometry = Mesh.Geometry(
+                position=[],
+                normal=[],
+                colour=[],
+                uv=[],
+                material=[],
+                piece_id=[]
+            )
+        else:
+            geometry = Mesh.Geometry(
+                position=[],
+                normal=[],
+                colour=[],
+                uv=[],
+                material=[],
+                dmg_position=[],
+                dmg_normal=[],
+                weight=[],
+                piece_id=[]
+            )
         locators = {}
+
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
-                for i, fvtx_attribute_list in enumerate(cls.get_geometry(prim)):
-                    face_vertices[i].extend(fvtx_attribute_list)
+                geometry.merge(cls.get_geometry(prim))
             
             if prim.IsA(UsdGeom.Xform) and not prim.GetChildren():
                 loc_name = prim.GetName()
@@ -703,7 +766,7 @@ class Mesh:
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
-                    cls.Geometry(*face_vertices), locators)
+                    geometry, locators)
 
 
 if __name__ == "__main__":
