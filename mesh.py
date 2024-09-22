@@ -173,11 +173,6 @@ class Mesh:
             assert other_geo._keys == self._keys
             for key in self._keys:
                 self._dict[key].extend(other_geo._dict[key])
-
-        # NOTES FOR MYSELF:
-        # * Make everything an iterator if possible
-        # * Make vertices/face-vertices "elements" which are hashable/iterable but also support getting values by string key (subclass of tuple?)
-        # * as_elements -> unique_elements (vertices) -> indices
         
         class _GeoIterator:
             def __init__(self, parent_iterator, original_callable=None):
@@ -273,28 +268,10 @@ class Mesh:
 
     def write_to_rwm(self, f):
         print("Writing to RWM".center(80, "="))
-        # We use "fvtx" or "vtx" to denote whether array items are per face-vertex or per vertex
-        #fvtx_data = list(self.geometry.elements().ordered_by("material"))
-        #vtx_data = list(self.geometry.iterate_from(vtx_data).unique_elements())
-        # Make an index for each face-vertex which maps it to a vertex
-        # fvtx_indices, vtx_data = unflatten_array(fvtx_data)
-        # assert len(fvtx_indices) % 3 == 0  # We should be able to construct triangles from these
 
-        # We're relying on this producing the same material order as that of vtx_data
         elements = self.geometry.elements()
         materials = elements.values_of("material")
         ordered_materials = sorted(set(materials))
-
-        # Now we need to obtain the numbers of face-vertices and vertices for each material
-        # mat_to_fvtx_indices = defaultdict(list)
-        # mat_index = self.geometry.attrib_index("material")
-        # for fvtx_index in fvtx_indices:
-        #     material = vtx_data[fvtx_index][mat_index]
-        #     mat_to_fvtx_indices[material].append(fvtx_index)
-        # mat_to_vertices = defaultdict(list)
-        # for vertex in vtx_data:
-        #     material = vtx_data[fvtx_index][mat_index]
-        #     mat_to_vertices[material].append(vertex)
 
         f.write(self._mesh_type.encode("ascii"))
         write_uchar(f, self._version)
@@ -336,13 +313,12 @@ class Mesh:
 
         face_vertices = self.geometry.elements().ordered_by("material")
         vertices = face_vertices.unique_elements()
+
         for material, mat_facevertices in face_vertices.split_by("material"):
-            #print("iterating material")
             write_uint(f, 0)  # Flags
             mat_vertices = mat_facevertices.unique_elements()
             write_uint(f, len(mat_vertices))
             for vertex in mat_vertices:
-                #print("iterating vertex")
                 write_floats(f, vertex.attr("position"))
                 write_floats(f, vertex.attr("normal"))
                 colour = vertex.attr("colour")
@@ -350,20 +326,10 @@ class Mesh:
                 write_uchars(f, tuple(int(c*255) for c in colour))
                 uv = vertex.attr("uv")
                 write_floats(f, (uv[0], -uv[1]))  # Flip V
-
-            # mat_fvtx_indices = mat_to_fvtx_indices[material]
-            # piece_ids = {v.attr("piece_id") for v in mat_vertices}
-            # pidx = self.geometry.attrib_index("piece_id")
-            # piece_fvtx_counts = {pid: len([fv for fv in mat_fvtx_indices if vtx_data[fv][pidx] == pid]) for pid in piece_ids}
-            # num_pieces = len(piece_ids)
-            # assert piece_ids == set(range(num_pieces))
             
             mat_piece_facevertices = mat_facevertices.split_by("piece_id")
-            num_fvtxs = len(mat_piece_facevertices)
-            print("wrote", num_fvtxs)
-            write_uint(f, num_fvtxs)  # Number of pieces
+            write_uint(f, len(mat_piece_facevertices))  # Number of pieces for this material
             for piece_id, facevertices_to_write in mat_piece_facevertices:
-                print("iterating face-vertex")
                 write_uint(f, piece_id)
                 num_fvtxs = len(facevertices_to_write)
                 assert num_fvtxs % 3 == 0
@@ -371,7 +337,30 @@ class Mesh:
                 indices = facevertices_to_write.indices_in(vertices)
                 write_ushorts(f, indices)
         
-        # TODO: SHL mesh shit
+        if self._mesh_type == "SHL":
+            num_dmg_verts = len(vertices)
+            print(f"Writing {num_dmg_verts} damage verts")
+            for v in vertices:
+                write_floats(f, v.attr("dmg_position"))
+                write_floats(f, v.attr("dmg_normal"))
+
+            num_bones = 8
+            write_uint(f, num_bones)
+            write_uint(f, 2)  # Number of bone weights per vertex
+            for v in vertices:
+                bone1, weight1, bone2, weight2 = v.attr("weight")
+                write_uint(f, bone1)
+                write_float(f, weight1)
+                write_uint(f, bone2)
+                write_float(f, weight2)
+            # TODO: whatever this stuff is
+            for _ in range(num_bones):
+                for _ in range(3):
+                    write_floats(f, (0., 0., 0.))
+                write_float(f, 0.)
+                for _ in range(3):
+                    write_floats(f, (0., 0., 0.))
+                write_float(f, 0.)
 
     @classmethod
     def read_from_rwm(cls, f):
@@ -719,9 +708,9 @@ class Mesh:
             colour=colours,
             uv=uvs,
             material=materials,
-            #dmg_position=dmg_positions,
-            #dmg_normal=dmg_normals,
-            #weight=weights,
+            dmg_position=dmg_positions,
+            dmg_normal=dmg_normals,
+            weight=weights,
             piece_id=piece_ids
         )
 
