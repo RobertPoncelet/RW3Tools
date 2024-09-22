@@ -133,11 +133,12 @@ class Mesh:
         "SHL": 6
     }
 
-    def __init__(self, mesh_type, version, geometry, locators):
+    def __init__(self, mesh_type, version, geometry, locators, bone_stuff):
         self._mesh_type = mesh_type
         self._version = version
         self.geometry = geometry
         self._locators = locators
+        self._bone_stuff = bone_stuff
 
     class Geometry:
         # TODO: I haven't implemented the below features yet, and I'm not even sure I need to
@@ -476,18 +477,19 @@ class Mesh:
                 assert 0. <= weight1 <= 1.
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
-                print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
+                #print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
                 vtx_dict["weight"].append((bone1, weight1, bone2, weight2))
             assert bone_set == set(range(num_bones))
             for _ in range(num_bones):
-                vectors = []
+                vectors1 = []
+                vectors2 = []
                 for _ in range(3):
-                    vectors.append(read_floats(f, 3))
+                    vectors1.append(read_floats(f, 3))
                 float1 = read_float(f)
                 for _ in range(3):
-                    vectors.append(read_floats(f, 3))
+                    vectors2.append(read_floats(f, 3))
                 float2 = read_float(f)
-                bone_stuff.append((vectors, float1, float2))
+                bone_stuff.append((vectors1, vectors2, float1, float2))
 
         if mesh_type in ("ARE", "SHL"):
             num_sprite_types = read_uint(f)
@@ -525,7 +527,36 @@ class Mesh:
         fvtx_attribs = transposed(*fvtx_data, container_type=list) + [fvtx_dict["piece_ids"]]
         face_vertices = cls.Geometry(**dict(zip(fvtx_keys, fvtx_attribs)))
     
-        return Mesh(mesh_type, version, face_vertices, locators)
+        return Mesh(mesh_type, version, face_vertices, locators, bone_stuff)
+    
+    def add_bone_stuff_to_prim(self, prim):
+        # Remember: the "bone matrix" is 3x3
+        bonemat1_attr = prim.CreateAttribute("bonemats1", Sdf.ValueTypeNames.Matrix3dArray)
+        bonemat2_attr = prim.CreateAttribute("bonemats2", Sdf.ValueTypeNames.Matrix3dArray)
+        bonefloat1_attr = prim.CreateAttribute("bonefloats1", Sdf.ValueTypeNames.FloatArray)
+        bonefloat2_attr = prim.CreateAttribute("bonefloats2", Sdf.ValueTypeNames.FloatArray)
+
+        bonemat1_attr.Set([Gf.Matrix3d(b[0]) for b in self._bone_stuff])
+        bonemat2_attr.Set([Gf.Matrix3d(b[1]) for b in self._bone_stuff])
+        bonefloat1_attr.Set([b[2] for b in self._bone_stuff])
+        bonefloat2_attr.Set([b[2] for b in self._bone_stuff])
+
+    @classmethod
+    def get_bone_stuff_from_prim(cls, prim):
+        bonemats1 = prim.GetAttribute("bonemats1").Get()
+        bonemats2 = prim.GetAttribute("bonemats2").Get()
+        bonefloats1 = prim.GetAttribute("bonefloats1").Get()
+        bonefloats2 = prim.GetAttribute("bonefloats2").Get()
+
+        assert len(bonemats1) == len(bonemats2) == len(bonefloats1) == len(bonefloats2) == 8
+        bone_stuff = []
+        for i in range(len(bonemats1)):
+            bonemat1 = [v for v in bonemats1[i]]
+            bonemat2 = [v for v in bonemats2[i]]
+            bonefloat1 = bonefloats1[i]
+            bonefloat2 = bonefloats2[i]
+            bone_stuff.append((bonemat1, bonemat2, bonefloat1, bonefloat2))
+        return bone_stuff
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -538,7 +569,8 @@ class Mesh:
         mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
-        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials, _, _, _, _ = self.geometry.as_tuple()
+        fvtx_positions, fvtx_normals, fvtx_colours, fvtx_uvs, fvtx_materials, fvtx_dmg_positions, fvtx_dmg_normals, fvtx_weights, fvtx_piece_ids = self.geometry.as_attrib_tuple()
+        # TODO: apply merge_vertices to the new geometry iterators system
         fvtx_p_indices, points = unflatten_array(fvtx_positions, deduplicate=merge_vertices)
         # Now we have an index for each face-vertex which maps it to a *point* - NOT the same as RWM!
         assert len(fvtx_p_indices) % 3 == 0  # We should be able to construct triangles from these
@@ -585,7 +617,28 @@ class Mesh:
                                                              interpolation="faceVarying")
         st_primvar.Set(fvtx_uvs)
 
+        dmg_pos_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_position",
+                                                                  Sdf.ValueTypeNames.Point3fArray,
+                                                                  interpolation="vertex")
+        vtx_dmg_positions = list(self.geometry.elements().unique_elements().values_of("dmg_position"))
+        assert len(points) == len(vtx_dmg_positions)
+        dmg_pos_primvar.Set(vtx_dmg_positions)
+
+        dmg_normal_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_normal",
+                                                                     Sdf.ValueTypeNames.Normal3fArray,
+                                                                     interpolation="vertex")
+        vtx_dmg_normals = list(self.geometry.elements().unique_elements().values_of("dmg_normal"))
+        assert len(points) == len(vtx_dmg_normals)
+        dmg_normal_primvar.Set(vtx_dmg_normals)
+
+        piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
+                                                                   Sdf.ValueTypeNames.IntArray,
+                                                                   interpolation="faceVarying")
+        piece_id_primvar.Set(list(self.geometry.elements().values_of("piece_id")))
+
         # TODO: do the same for colours
+
+        self.add_bone_stuff_to_prim(mesh.GetPrim())
 
         for loc_name, matrix in self._locators.items():
             gf_matrix = Gf.Matrix4d(matrix)
@@ -742,6 +795,7 @@ class Mesh:
                 piece_id=[]
             )
         locators = {}
+        bone_stuff = []
 
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
@@ -752,10 +806,12 @@ class Mesh:
                 loc = UsdGeom.Xform(prim)
                 matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
                 locators[loc_name] = [vec for vec in matrix]
+            
+
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
-                    geometry, locators)
+                    geometry, locators, bone_stuff)
 
 
 if __name__ == "__main__":
