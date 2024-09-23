@@ -133,12 +133,13 @@ class Mesh:
         "SHL": 6
     }
 
-    def __init__(self, mesh_type, version, geometry, locators, bone_stuff):
+    def __init__(self, mesh_type, version, geometry, locators, bone_stuff, textures_dir):
         self._mesh_type = mesh_type
         self._version = version
         self.geometry = geometry
         self._locators = locators
         self._bone_stuff = bone_stuff
+        self._textures_dir = textures_dir
 
     class UnsupportedMeshError(Exception):
         pass
@@ -536,8 +537,12 @@ class Mesh:
         fvtx_data = flatten_array(fvtx_dict["indices"], vtx_data)
         fvtx_attribs = transposed(*fvtx_data, container_type=list) + [fvtx_dict["piece_id"]]
         face_vertices = cls.Geometry(**dict(zip(fvtx_keys, fvtx_attribs)))
+
+        textures_dir = os.path.dirname(f.name)
+        if not os.path.isdir(textures_dir):
+            textures_dir = None
     
-        return Mesh(mesh_type, version, face_vertices, locators, bone_stuff)
+        return Mesh(mesh_type, version, face_vertices, locators, bone_stuff, textures_dir)
     
     def add_bone_stuff_to_prim(self, prim):
         # Remember: the "bone matrix" is 3x3
@@ -600,7 +605,7 @@ class Mesh:
             mat_name, spec_map, mat_colour = material
             if not mat_name or mat_name[0].isnumeric():
                 mat_name = "_" + mat_name
-            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices)
+            geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices, "materialBind")
             UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
 
             # Create a Material node under /Root/Materials/
@@ -611,7 +616,34 @@ class Mesh:
             shader_prim.CreateIdAttr("UsdPreviewSurface")
 
             # Set some default PBR values (this can be extended)
-            shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*mat_colour[:3]))  # OwO
+            if self._textures_dir:
+                tex_path = os.path.join(self._textures_dir, mat_name.lstrip("_") + ".tga")
+                if not os.path.isfile(tex_path):
+                    tex_path = os.path.join(self._textures_dir, mat_name.lstrip("_") + ".bmp")
+                if not os.path.isfile(tex_path):
+                    tex_path = None
+            else:
+                tex_path = None
+
+            diffuse_colour_input = shader_prim.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f)
+            if tex_path:
+                texture_prim_path = material_prim.GetPath().AppendPath("diffuseTexture")
+                texture_shader = UsdShade.Shader.Define(stage, texture_prim_path)
+                texture_shader.CreateIdAttr("UsdUVTexture")
+                texture_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(tex_path.replace("\\", "/"))
+                texture_shader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB")
+                texture_shader.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+                texture_shader.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+                uv_primvar_prim_path = material_prim.GetPath().AppendPath("uvReader")
+                uv_reader_shader = UsdShade.Shader.Define(stage, uv_primvar_prim_path)
+                uv_reader_shader.CreateIdAttr("UsdPrimvarReader_float2")
+                uv_reader_shader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+                uv_output = uv_reader_shader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+                texture_shader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(uv_output)
+                texture_output = texture_shader.CreateOutput("rgb", Sdf.ValueTypeNames.Color3d)
+                diffuse_colour_input.ConnectToSource(texture_output)
+            else:
+                diffuse_colour_input.Set(Gf.Vec3f(*mat_colour[:3]))  # OwO
             shader_prim.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
             shader_prim.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
 
@@ -861,7 +893,7 @@ class Mesh:
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
-                    geometry, locators, bone_stuff)
+                    geometry, locators, bone_stuff, None)
 
 
 if __name__ == "__main__":
