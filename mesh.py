@@ -446,7 +446,7 @@ class Mesh:
                 num_tris = read_uint(f)
                 print(f"Number of triangles for {material[0]} piece {piece_id}: {num_tris}")
                 fvtx_dict["indices"].extend(read_ushorts(f, num_tris * 3))
-                fvtx_dict["piece_ids"].extend([piece_id] * num_tris * 3)
+                fvtx_dict["piece_id"].extend([piece_id] * num_tris * 3)
 
         assert all(idx < total_num_verts for idx in fvtx_dict["indices"])
 
@@ -518,13 +518,13 @@ class Mesh:
             vtx_keys = ("position", "normal", "colour", "uv", "material")
         assert set(vtx_dict.keys()) == set(vtx_keys)
 
-        fvtx_keys = vtx_keys + ("piece_ids",)
+        fvtx_keys = vtx_keys + ("piece_id",)
         
         # Transform into flat, non-indexed data, 1:1 with face-vertices
         # TODO: this is kinda unintuitive and needs refactoring
         vtx_data = transposed(*(vtx_dict[key] for key in vtx_keys))
         fvtx_data = flatten_array(fvtx_dict["indices"], vtx_data)
-        fvtx_attribs = transposed(*fvtx_data, container_type=list) + [fvtx_dict["piece_ids"]]
+        fvtx_attribs = transposed(*fvtx_data, container_type=list) + [fvtx_dict["piece_id"]]
         face_vertices = cls.Geometry(**dict(zip(fvtx_keys, fvtx_attribs)))
     
         return Mesh(mesh_type, version, face_vertices, locators, bone_stuff)
@@ -620,20 +620,22 @@ class Mesh:
         dmg_pos_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_position",
                                                                   Sdf.ValueTypeNames.Point3fArray,
                                                                   interpolation="vertex")
-        vtx_dmg_positions = list(self.geometry.elements().unique_elements().values_of("dmg_position"))
+        vtx_dmg_positions = list(self.geometry.elements().values_of("dmg_position"))#.unique_elements())
+        print(len(points), len(vtx_dmg_positions))
         assert len(points) == len(vtx_dmg_positions)
         dmg_pos_primvar.Set(vtx_dmg_positions)
 
         dmg_normal_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_normal",
                                                                      Sdf.ValueTypeNames.Normal3fArray,
                                                                      interpolation="vertex")
-        vtx_dmg_normals = list(self.geometry.elements().unique_elements().values_of("dmg_normal"))
+        vtx_dmg_normals = list(self.geometry.elements().values_of("dmg_normal"))#.unique_elements())
         assert len(points) == len(vtx_dmg_normals)
         dmg_normal_primvar.Set(vtx_dmg_normals)
 
         piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
                                                                    Sdf.ValueTypeNames.IntArray,
                                                                    interpolation="faceVarying")
+        print(self.geometry._keys)
         piece_id_primvar.Set(list(self.geometry.elements().values_of("piece_id")))
 
         # TODO: do the same for colours
