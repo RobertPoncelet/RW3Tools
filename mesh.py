@@ -340,7 +340,7 @@ class Mesh:
         
         if self._mesh_type == "SHL":
             num_dmg_verts = len(vertices)
-            print(f"Writing {num_dmg_verts} damage verts")
+            write_uint(f, num_dmg_verts)
             for v in vertices:
                 write_floats(f, v.attr("dmg_position"))
                 write_floats(f, v.attr("dmg_normal"))
@@ -354,14 +354,15 @@ class Mesh:
                 write_float(f, weight1)
                 write_uint(f, bone2)
                 write_float(f, weight2)
-            # TODO: whatever this stuff is
-            for _ in range(num_bones):
-                for _ in range(3):
-                    write_floats(f, (0., 0., 0.))
-                write_float(f, 0.)
-                for _ in range(3):
-                    write_floats(f, (0., 0., 0.))
-                write_float(f, 0.)
+            for bonemat1, bonemat2, bonefloat1, bonefloat2 in self._bone_stuff:
+                for vec in bonemat1:
+                    write_floats(f, vec)
+                write_float(f, bonefloat1)
+                for vec in bonemat2:
+                    write_floats(f, vec)
+                write_float(f, bonefloat2)
+            
+            write_uint(f, 0)  # Number of sprite types
 
     @classmethod
     def read_from_rwm(cls, f):
@@ -621,7 +622,6 @@ class Mesh:
                                                                   Sdf.ValueTypeNames.Point3fArray,
                                                                   interpolation="vertex")
         vtx_dmg_positions = list(self.geometry.elements().values_of("dmg_position"))#.unique_elements())
-        print(len(points), len(vtx_dmg_positions))
         assert len(points) == len(vtx_dmg_positions)
         dmg_pos_primvar.Set(vtx_dmg_positions)
 
@@ -632,10 +632,28 @@ class Mesh:
         assert len(points) == len(vtx_dmg_normals)
         dmg_normal_primvar.Set(vtx_dmg_normals)
 
+        boneid1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneid1",
+                                                                  Sdf.ValueTypeNames.IntArray,
+                                                                  interpolation="vertex")
+        boneweight1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneweight1",
+                                                                      Sdf.ValueTypeNames.FloatArray,
+                                                                      interpolation="vertex")
+        boneid2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneid2",
+                                                                  Sdf.ValueTypeNames.IntArray,
+                                                                  interpolation="vertex")
+        boneweight2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneweight2",
+                                                                      Sdf.ValueTypeNames.FloatArray,
+                                                                      interpolation="vertex")
+        vtx_weights = list(self.geometry.elements().values_of("weight"))#.unique_elements())
+        assert len(points) == len(vtx_weights)
+        boneid1_primvar.Set([w[0] for w in vtx_weights])
+        boneweight1_primvar.Set([w[1] for w in vtx_weights])
+        boneid2_primvar.Set([w[2] for w in vtx_weights])
+        boneweight2_primvar.Set([w[3] for w in vtx_weights])
+
         piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
                                                                    Sdf.ValueTypeNames.IntArray,
                                                                    interpolation="faceVarying")
-        print(self.geometry._keys)
         piece_id_primvar.Set(list(self.geometry.elements().values_of("piece_id")))
 
         # TODO: do the same for colours
@@ -719,6 +737,9 @@ class Mesh:
         usd_fvtx_indices = mesh.GetFaceVertexIndicesAttr().Get()
         usd_normals = [transform.TransformDir(n) for n in mesh.GetNormalsAttr().Get()]
         usd_uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
+        usd_dmg_positions = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("dmg_position").Get()
+        usd_dmg_normals = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("dmg_normal").Get()
+        usd_piece_ids = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("piece_id").Get()
         assert len(usd_fvtx_indices) == len(usd_normals) == len(usd_uvs)
         if not all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get()):
             raise RuntimeError("This script does not support faces with >3 vertices - please "
@@ -730,7 +751,10 @@ class Mesh:
         # Handle materials
         mat_api = UsdShade.MaterialBindingAPI(mesh_prim)
         default_material_prim = mat_api.GetDirectBinding().GetMaterial().GetPrim()
-        default_material = cls.get_material(default_material_prim)
+        if default_material_prim:
+            default_material = cls.get_material(default_material_prim)
+        else:
+            default_material = None
         materials = [default_material] * len(usd_fvtx_indices)
 
         # Override default material from subsets
@@ -750,12 +774,15 @@ class Mesh:
         positions = [tuple(p) for p in positions]
         normals = [tuple(n) for n in usd_normals]
         uvs = [tuple(uv) for uv in usd_uvs]
+        dmg_positions = [tuple(p) for p in usd_dmg_positions]
+        dmg_normals = [tuple(p) for p in usd_dmg_normals]
+        piece_ids = usd_piece_ids
 
-        # TODO: do these properly
-        dmg_positions = positions.copy()
-        dmg_normals = normals.copy()
-        weights = [(0, 0.5, 1, 0.5) for _ in positions]
-        piece_ids = [0 for _ in positions]
+        boneids1 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneid1").Get()
+        boneweights1 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneweight1").Get()
+        boneids2 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneid2").Get()
+        boneweights2 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneweight2").Get()
+        weights = [(boneids1[i], boneweights1[i], boneids2[i], boneweights2[i]) for i in range(len(boneids1))]
 
         return Mesh.Geometry(
             position=positions,
@@ -809,7 +836,8 @@ class Mesh:
                 matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
                 locators[loc_name] = [vec for vec in matrix]
             
-
+            if prim.HasAttribute("bonemats1"):
+                bone_stuff.extend(cls.get_bone_stuff_from_prim(prim))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
