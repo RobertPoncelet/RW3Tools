@@ -319,7 +319,7 @@ class Mesh:
             write_float(f, 30.)  # ???
             write_uint(f, 0)  # Also dunno, flags?
 
-        face_vertices = self.geometry.elements().ordered_by("material")
+        face_vertices = self.geometry.elements().ordered_by("piece_id").ordered_by("material")
         vertices = face_vertices.unique_elements()
 
         for material, mat_facevertices in face_vertices.split_by("material"):
@@ -346,8 +346,7 @@ class Mesh:
                 write_ushorts(f, indices)
         
         if self._mesh_type == "SHL":
-            num_dmg_verts = len(vertices)
-            write_uint(f, num_dmg_verts)
+            write_uint(f, len(vertices))
             for v in vertices:
                 write_floats(f, v.attr("dmg_position"))
                 write_floats(f, v.attr("dmg_normal"))
@@ -399,7 +398,7 @@ class Mesh:
         print(f"Bounding box min: {read_floats(f, 3)}")
         print(f"Bounding box max: {read_floats(f, 3)}")
         print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
-        print(f"Something else (mass?): {read_float(f)}")
+        print(f"Something else (mass? bounding radius?): {read_float(f)}")
 
         locators = {}
         for _ in range(num_locators):
@@ -605,6 +604,7 @@ class Mesh:
             mat_name, spec_map, mat_colour = material
             if not mat_name or mat_name[0].isnumeric():
                 mat_name = "_" + mat_name
+            mat_name = mat_name.replace(" ", "_")
             geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices, "materialBind")
             UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
 
@@ -788,14 +788,23 @@ class Mesh:
         usd_points = [transform.Transform(p) for p in mesh.GetPointsAttr().Get()]
         usd_fvtx_indices = mesh.GetFaceVertexIndicesAttr().Get()
         usd_normals = [transform.TransformDir(n) for n in mesh.GetNormalsAttr().Get()]
-        usd_uvs = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("st").Get()
-        usd_dmg_positions = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("dmg_position").Get()
-        usd_dmg_normals = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("dmg_normal").Get()
-        usd_piece_ids = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("piece_id").Get()
-        assert len(usd_fvtx_indices) == len(usd_normals) == len(usd_uvs)
+
+        primvars = UsdGeom.PrimvarsAPI(mesh_prim)
+        usd_uvs = primvars.GetPrimvar("st").Get()
+        usd_piece_ids = primvars.GetPrimvar("piece_id").Get()
+
         if not all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get()):
             raise RuntimeError("This script does not support faces with >3 vertices - please "
                                "triangulate your mesh first.")
+    
+        def facevertex_data_of(primvar):
+            if primvar.GetInterpolation() == "vertex":
+                return flatten_array(usd_fvtx_indices, primvar.Get())
+            else:
+                return primvar.Get()
+    
+        usd_dmg_positions = facevertex_data_of(primvars.GetPrimvar("dmg_position"))
+        usd_dmg_normals = facevertex_data_of(primvars.GetPrimvar("dmg_normal"))
 
         positions = flatten_array(usd_fvtx_indices, usd_points)
         colours = [(1., 1., 1., 1.) for _ in usd_fvtx_indices]  # TODO
@@ -830,10 +839,10 @@ class Mesh:
         dmg_normals = [tuple(p) for p in usd_dmg_normals]
         piece_ids = usd_piece_ids
 
-        boneids1 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneid1").Get()
-        boneweights1 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneweight1").Get()
-        boneids2 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneid2").Get()
-        boneweights2 = UsdGeom.PrimvarsAPI(mesh_prim).GetPrimvar("boneweight2").Get()
+        boneids1 = facevertex_data_of(primvars.GetPrimvar("boneid1"))
+        boneweights1 = facevertex_data_of(primvars.GetPrimvar("boneweight1"))
+        boneids2 = facevertex_data_of(primvars.GetPrimvar("boneid2"))
+        boneweights2 = facevertex_data_of(primvars.GetPrimvar("boneweight2"))
         weights = [(boneids1[i], boneweights1[i], boneids2[i], boneweights2[i]) for i in range(len(boneids1))]
 
         return Mesh.Geometry(
