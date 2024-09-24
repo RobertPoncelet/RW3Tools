@@ -175,9 +175,10 @@ class Mesh:
             assert all(len(a) == num for a in self.as_attrib_tuple())
 
         def merge(self, other_geo):
-            assert other_geo._keys == self._keys
+            assert set(other_geo._keys) == set(self._keys)
             for key in self._keys:
                 self._dict[key].extend(other_geo._dict[key])
+            self.validate()
         
         class _GeoIterator:
             def __init__(self, parent_iterator, original_callable=None):
@@ -784,30 +785,43 @@ class Mesh:
     def get_geometry(cls, mesh_prim):
         mesh = UsdGeom.Mesh(mesh_prim)
         transform = mesh.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
+        if not all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get()):
+            raise RuntimeError("This script does not support faces with >3 vertices - please "
+                               "triangulate your mesh first.")
         
         usd_points = [transform.Transform(p) for p in mesh.GetPointsAttr().Get()]
         usd_fvtx_indices = mesh.GetFaceVertexIndicesAttr().Get()
         usd_normals = [transform.TransformDir(n) for n in mesh.GetNormalsAttr().Get()]
-
-        primvars = UsdGeom.PrimvarsAPI(mesh_prim)
-        usd_uvs = primvars.GetPrimvar("st").Get()
-        usd_piece_ids = primvars.GetPrimvar("piece_id").Get()
-
-        if not all(x == 3 for x in mesh.GetFaceVertexCountsAttr().Get()):
-            raise RuntimeError("This script does not support faces with >3 vertices - please "
-                               "triangulate your mesh first.")
-    
-        def facevertex_data_of(primvar):
-            if primvar.GetInterpolation() == "vertex":
-                return flatten_array(usd_fvtx_indices, primvar.Get())
-            else:
-                return primvar.Get()
-    
-        usd_dmg_positions = facevertex_data_of(primvars.GetPrimvar("dmg_position"))
-        usd_dmg_normals = facevertex_data_of(primvars.GetPrimvar("dmg_normal"))
-
         positions = flatten_array(usd_fvtx_indices, usd_points)
         colours = [(1., 1., 1., 1.) for _ in usd_fvtx_indices]  # TODO
+
+        attrib_dict = defaultdict(list)
+        attrib_dict["position"] = positions
+        attrib_dict["normal"] = usd_normals
+        attrib_dict["colour"] = colours
+
+        primvars = UsdGeom.PrimvarsAPI(mesh_prim)
+        def facevertex_data_of(primvar_name):
+            primvar = primvars.GetPrimvar(primvar_name)
+            if primvar.GetInterpolation() == "vertex":
+                return flatten_array(usd_fvtx_indices, primvar.Get())
+            elif primvar.GetInterpolation() == "faceVarying":
+                return primvar.Get()
+            else:
+                interp = primvar.GetInterpolation()
+                raise ValueError(f"Unrecognised primvar interpolation type: {interp}")
+
+        for attrib_name, primvar_name in {
+            "uv": "st",
+            "dmg_position": "dmg_position",
+            "dmg_normal": "dmg_normal",
+            "piece_id": "piece_id"
+        }.items():
+            if primvars.HasPrimvar(primvar_name):
+                attrib_dict[attrib_name] = facevertex_data_of(primvar_name)
+
+        if "piece_id" not in attrib_dict:
+            attrib_dict["piece_id"] = [0] * len(usd_fvtx_indices)
 
         # Handle materials
         mat_api = UsdShade.MaterialBindingAPI(mesh_prim)
@@ -822,7 +836,6 @@ class Mesh:
         geom_subsets = UsdGeom.Subset.GetGeomSubsets(mesh)
         for subset in geom_subsets:
             tri_indices = subset.GetIndicesAttr().Get()
-
             material = cls.get_material(subset.GetPrim())
 
             for tri_index in tri_indices:
@@ -831,31 +844,15 @@ class Mesh:
                 materials[start + 1] = material
                 materials[start + 2] = material
         assert all(materials)
+        attrib_dict["material"] = materials
 
-        positions = [tuple(p) for p in positions]
-        normals = [tuple(n) for n in usd_normals]
-        uvs = [tuple(uv) for uv in usd_uvs]
-        dmg_positions = [tuple(p) for p in usd_dmg_positions]
-        dmg_normals = [tuple(p) for p in usd_dmg_normals]
-        piece_ids = usd_piece_ids
+        bone_keys = ("boneid1", "boneweights1", "boneid2", "boneweights2")
+        if all(primvars.HasPrimvar(key) for key in bone_keys):
+            bone_attribs = tuple(facevertex_data_of(key) for key in bone_keys)
+            weights = [tuple(attr[i] for attr in bone_attribs) for i in range(len(bone_attribs[0]))]
+            attrib_dict["weight"] = weights
 
-        boneids1 = facevertex_data_of(primvars.GetPrimvar("boneid1"))
-        boneweights1 = facevertex_data_of(primvars.GetPrimvar("boneweight1"))
-        boneids2 = facevertex_data_of(primvars.GetPrimvar("boneid2"))
-        boneweights2 = facevertex_data_of(primvars.GetPrimvar("boneweight2"))
-        weights = [(boneids1[i], boneweights1[i], boneids2[i], boneweights2[i]) for i in range(len(boneids1))]
-
-        return Mesh.Geometry(
-            position=positions,
-            normal=normals,
-            colour=colours,
-            uv=uvs,
-            material=materials,
-            dmg_position=dmg_positions,
-            dmg_normal=dmg_normals,
-            weight=weights,
-            piece_id=piece_ids
-        )
+        return Mesh.Geometry(**attrib_dict)
 
     @classmethod
     def import_from_usd(cls, filepath, mesh_type="MSH"):
@@ -931,3 +928,4 @@ if __name__ == "__main__":
                 m.write_to_rwm(out_file)
         else:
             m.export_to_usd(args.out_path, merge_vertices=args.merge_vertices)
+        print(f"Successfully converted to {args.out_path}")
