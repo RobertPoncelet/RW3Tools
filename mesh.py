@@ -9,6 +9,16 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 # Read functions
 
+def read_vector(file, num=3):
+    if num == 2:
+        return Gf.Vec2f(*read_floats(file, num))
+    if num == 3:
+        return Gf.Vec3f(*read_floats(file, num))
+    elif num == 4:
+        return Gf.Vec4f(*read_floats(file, num))
+    else:
+        raise ValueError(f"Invalid number of vector components ({num})!")
+
 def read_string(file):
     string_size = struct.unpack('<I', file.read(4))[0]
     return file.read(string_size).decode('ascii')
@@ -48,6 +58,9 @@ def _read_multiple(file, format, num):
 
 
 # Write functions
+
+def write_vector(file, value):
+    write_floats(file, value)
 
 def write_string(file, string):
     write_uint(file, len(string))
@@ -133,9 +146,10 @@ class Mesh:
         "SHL": 6
     }
 
-    def __init__(self, mesh_type, version, geometry, locators, hitboxes, textures_dir):
+    def __init__(self, mesh_type, version, bounds, geometry, locators, hitboxes, textures_dir):
         self._mesh_type = mesh_type
         self._version = version
+        self._bounds = bounds
         self.geometry = geometry
         self._locators = locators
         self._hitboxes = hitboxes
@@ -143,6 +157,34 @@ class Mesh:
 
     class UnsupportedMeshError(Exception):
         pass
+
+    class Bounds:
+        def __init__(self, mins, maxs, centre=None, radius=None):
+            self.mins = Gf.Vec3f(mins)
+            self.maxs = Gf.Vec3f(maxs)
+            #assert all(mins[i] <= maxs[i] for i in range(3))
+            if centre:
+                self.centre = Gf.Vec3f(centre)
+            else:
+                self.centre = (self.mins + self.maxs) / 2
+            if radius:
+                self.radius = radius
+            else:
+                # TODO: this won't be accurate if the centre isn't really the centre
+                self.radius = (self.maxs - self.centre).GetLength()
+
+        def size(self):
+            return self.maxs - self.mins
+        
+        @classmethod
+        def read_from_file(cls, f):
+            return cls(read_vector(f), read_vector(f), read_vector(f), read_float(f))
+        
+        def write_to_file(self, f):
+            write_vector(f, self.mins)
+            write_vector(f, self.maxs)
+            write_vector(f, self.centre)
+            write_float(f, self.radius)
 
     class Geometry:
         # TODO: I haven't implemented the below features yet, and I'm not even sure I need to
@@ -290,17 +332,7 @@ class Mesh:
         write_uint(f, len(self.geometry) // 3)  # Number of triangles
         write_uint(f, len(self.geometry.elements().values_of("piece_id").unique_elements()))  # Number of pieces
 
-        positions = set(self.geometry.attribute("position"))
-        minx = min(v[0] for v in positions)
-        miny = min(v[1] for v in positions)
-        minz = min(v[2] for v in positions)
-        maxx = max(v[0] for v in positions)
-        maxy = max(v[1] for v in positions)
-        maxz = max(v[2] for v in positions)
-        write_floats(f, (minx, miny, minz))
-        write_floats(f, (maxx, maxy, maxz))
-        write_floats(f, ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2))
-        write_float(f, 30.)  # Mass?
+        self._bounds.write_to_file(f)
 
         for loc_name, matrix in self._locators.items():
             write_string(f, loc_name)
@@ -361,10 +393,8 @@ class Mesh:
                 write_float(f, weight1)
                 write_uint(f, octant2)
                 write_float(f, weight2)
-            for vectors, flt in self._hitboxes:
-                for vec in vectors:
-                    write_floats(f, vec)
-                write_float(f, flt)
+            for hitbox in self._hitboxes:
+                hitbox.write_to_file(f)
             
             write_uint(f, 0)  # Number of sprite types
 
@@ -395,10 +425,12 @@ class Mesh:
             assert total_num_pieces == 16
         else:
             assert total_num_pieces == 1
-        print(f"Bounding box min: {read_floats(f, 3)}")
-        print(f"Bounding box max: {read_floats(f, 3)}")
-        print(f"Another point (origin or centre of mass?): {read_floats(f, 3)}")
-        print(f"Something else (mass? bounding radius?): {read_float(f)}")
+        
+        bounds = cls.Bounds.read_from_file(f)
+        print(f"Bounding box min: {bounds.mins}")
+        print(f"Bounding box max: {bounds.maxs}")
+        print(f"Bounding box centre: {bounds.centre}")
+        print(f"Bounding radius: {bounds.radius}")
 
         locators = {}
         for _ in range(num_locators):
@@ -488,11 +520,7 @@ class Mesh:
                 vtx_dict["weight"].append((octant1, weight1, octant2, weight2))
             assert octant_set == set(range(num_octants))
             for _ in range(total_num_pieces):
-                vectors = []
-                for _ in range(3):
-                    vectors.append(read_floats(f, 3))
-                flt = read_float(f)
-                hitboxes.append((vectors, flt))
+                hitboxes.append(Mesh.Bounds.read_from_file(f))
         else:
             hitboxes = []
 
@@ -536,14 +564,14 @@ class Mesh:
         if not os.path.isdir(textures_dir):
             textures_dir = None
     
-        return Mesh(mesh_type, version, face_vertices, locators, hitboxes, textures_dir)
+        return Mesh(mesh_type, version, bounds, face_vertices, locators, hitboxes, textures_dir)
     
     def add_hitboxes_to_prim(self, prim):
         dmgmat_attr = prim.CreateAttribute("dmgmat", Sdf.ValueTypeNames.Matrix3dArray)
         dmgfloat_attr = prim.CreateAttribute("dmgfloat", Sdf.ValueTypeNames.FloatArray)
 
-        dmgmat_attr.Set([Gf.Matrix3d(hb[0]) for hb in self._hitboxes])
-        dmgfloat_attr.Set([hb[1] for hb in self._hitboxes])
+        dmgmat_attr.Set([Gf.Matrix3d(*hb.mins, *hb.maxs, *hb.centre) for hb in self._hitboxes])
+        dmgfloat_attr.Set([hb.radius for hb in self._hitboxes])
 
     @classmethod
     def get_hitboxes_from_prim(cls, prim):
@@ -553,9 +581,9 @@ class Mesh:
         assert len(dmgmats) == len(dmgfloats) == 16
         hitboxes = []
         for i in range(len(dmgmats)):
-            dmgmat = [v for v in dmgmats[i]]
-            dmgfloat = dmgfloats[i]
-            hitboxes.append((dmgmat, dmgfloat))
+            mins, maxs, centre = dmgmats[i]
+            radius = dmgfloats[i]
+            hitboxes.append(Mesh.Bounds(mins, maxs, centre, radius))
         return hitboxes
     
     def export_to_usd(self, filepath, merge_vertices=False):
@@ -881,10 +909,19 @@ class Mesh:
             
             if prim.HasAttribute("dmgmats"):
                 hitboxes.extend(cls.get_hitboxes_from_prim(prim))
+        
+        positions = set(geometry.attribute("position"))
+        minx = min(v[0] for v in positions)
+        miny = min(v[1] for v in positions)
+        minz = min(v[2] for v in positions)
+        maxx = max(v[0] for v in positions)
+        maxy = max(v[1] for v in positions)
+        maxz = max(v[2] for v in positions)
+        bounds = Mesh.Bounds(Gf.Vec3f(minx, miny, minz), Gf.Vec3f(maxx, maxy, maxz))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
-                    geometry, locators, hitboxes, None)
+                    bounds, geometry, locators, hitboxes, None)
 
 
 if __name__ == "__main__":
