@@ -155,8 +155,23 @@ class Mesh:
         self._hitboxes = hitboxes
         self._textures_dir = textures_dir
 
+        self.validate_attribs()
+    
+    def validate_attribs(self):
+        mesh_attribs = {
+            "MSH": {"position", "normal", "colour", "uv", "material"},
+            "ARE": {"position", "normal", "colour", "uv", "material"},
+            "SHL": {"position", "normal", "colour", "uv", "material", "deform_position", "deform_normal", "weight"}
+        }
+        our_attribs = set(self.geometry.attrib_names())
+        missing = mesh_attribs[self._mesh_type].difference(our_attribs)
+        assert not missing, f"Mesh is missing these attributes: {', '.join(missing)}"
+        
         if self._mesh_type == "SHL":
             assert len(self._hitboxes) == 16
+        elif not mesh_attribs["SHL"].difference(our_attribs):
+            print("Mesh has all the required attributes for SHL (armour) type. "
+                  "If you meant to use this type, run the same command with \"--mesh-type SHL\".")
 
     class UnsupportedMeshError(Exception):
         pass
@@ -325,6 +340,9 @@ class Mesh:
         
         def as_attrib_tuple(self):
             return tuple(self._dict[key] for key in self._keys)
+        
+        def attrib_names(self):
+            return self._keys
         
         def elements(self):
             return Mesh.Geometry._GeoIterator(None, lambda: (self.element(i) for i in range(len(self))))
@@ -607,11 +625,14 @@ class Mesh:
     
     @classmethod
     def get_hitboxes_from_geometry(cls, geometry):
+        pieces = set(geometry.elements().values_of("piece_id").unique_elements())
+        has_all_pieces = pieces == set(range(16))
+        assert has_all_pieces, (f"SHL (armour) mesh does not include all the required pieces. "
+                                "Ensure that the \"piece_id\" attribute includes integers 0-15.")
         hitboxes = []
         for piece_id, face_vertices in geometry.elements().ordered_by("piece_id").split_by("piece_id"):
             hitboxes.append(cls.Bounds.from_points(face_vertices.values_of("position"),
                                                    padding=Gf.Vec3f(1., 0., 1.)))
-        assert len(hitboxes) == 16
         return hitboxes
     
     def export_to_usd(self, filepath, merge_vertices=False):
@@ -644,10 +665,13 @@ class Mesh:
         # Create face sets for each material
         for material, tri_indices in mat_to_tri_indices.items():
             mat_name, spec_map, mat_colour = material
+
+            # USD prim names have some restrictions
             if not mat_name or mat_name[0].isnumeric():
                 mat_name = "_" + mat_name
             mat_name = mat_name.replace(" ", "_")
             mat_name = mat_name.replace("-", "_")
+
             geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices, "materialBind")
             UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
 
@@ -924,7 +948,7 @@ class Mesh:
         
         positions = set(geometry.attribute("position"))
         bounds = Mesh.Bounds.from_points(positions)
-        if not hitboxes:
+        if not hitboxes and mesh_type == "SHL":
             hitboxes = cls.get_hitboxes_from_geometry(geometry)
 
         print(f"Mesh successfully imported from USD: {filepath}")
