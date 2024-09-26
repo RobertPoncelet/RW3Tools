@@ -133,12 +133,12 @@ class Mesh:
         "SHL": 6
     }
 
-    def __init__(self, mesh_type, version, geometry, locators, bone_stuff, textures_dir):
+    def __init__(self, mesh_type, version, geometry, locators, hitboxes, textures_dir):
         self._mesh_type = mesh_type
         self._version = version
         self.geometry = geometry
         self._locators = locators
-        self._bone_stuff = bone_stuff
+        self._hitboxes = hitboxes
         self._textures_dir = textures_dir
 
     class UnsupportedMeshError(Exception):
@@ -349,25 +349,22 @@ class Mesh:
         if self._mesh_type == "SHL":
             write_uint(f, len(vertices))
             for v in vertices:
-                write_floats(f, v.attr("dmg_position"))
-                write_floats(f, v.attr("dmg_normal"))
+                write_floats(f, v.attr("deform_position"))
+                write_floats(f, v.attr("deform_normal"))
 
-            num_bones = 8
-            write_uint(f, num_bones)
-            write_uint(f, 2)  # Number of bone weights per vertex
+            num_octants = 8
+            write_uint(f, num_octants)
+            write_uint(f, 2)  # Number of weights per vertex
             for v in vertices:
-                bone1, weight1, bone2, weight2 = v.attr("weight")
-                write_uint(f, bone1)
+                octant1, weight1, octant2, weight2 = v.attr("weight")
+                write_uint(f, octant1)
                 write_float(f, weight1)
-                write_uint(f, bone2)
+                write_uint(f, octant2)
                 write_float(f, weight2)
-            for bonemat1, bonemat2, bonefloat1, bonefloat2 in self._bone_stuff:
-                for vec in bonemat1:
+            for vectors, flt in self._hitboxes:
+                for vec in vectors:
                     write_floats(f, vec)
-                write_float(f, bonefloat1)
-                for vec in bonemat2:
-                    write_floats(f, vec)
-                write_float(f, bonefloat2)
+                write_float(f, flt)
             
             write_uint(f, 0)  # Number of sprite types
 
@@ -394,7 +391,9 @@ class Mesh:
             raise Mesh.UnsupportedMeshError("No geometry in this mesh!")
         total_num_pieces = read_uint(f)
         print(f"Total number of mesh pieces: {total_num_pieces}")
-        if mesh_type != "SHL":
+        if mesh_type == "SHL":
+            assert total_num_pieces == 16
+        else:
             assert total_num_pieces == 1
         print(f"Bounding box min: {read_floats(f, 3)}")
         print(f"Bounding box max: {read_floats(f, 3)}")
@@ -444,13 +443,13 @@ class Mesh:
                 vtx_dict["uv"].append((uv[0], -uv[1]))  # Flip V
                 vtx_dict["material"].append(material)
 
-            num_pieces = read_uint(f)
+            num_mat_pieces = read_uint(f)
             if mesh_type == "SHL":
-                print(f"Number of pieces: {num_pieces}")
+                print(f"Number of pieces for {material[0]}: {num_mat_pieces}")
             else:
-                assert num_pieces == 1
+                assert num_mat_pieces == 1
 
-            for _ in range(num_pieces):
+            for _ in range(num_mat_pieces):
                 piece_id = read_uint(f)
                 num_tris = read_uint(f)
                 print(f"Number of triangles for {material[0]} piece {piece_id}: {num_tris}")
@@ -460,47 +459,42 @@ class Mesh:
         assert all(idx < total_num_verts for idx in fvtx_dict["indices"])
 
         if mesh_type == "SHL":
-            bone_stuff = []
-            num_dmg_verts = read_uint(f)
-            print(f"\nNumber of alternate \"damage\" vertices: {num_dmg_verts}")
-            assert num_dmg_verts == total_num_verts
-            for _ in range(num_dmg_verts):
-                vtx_dict["dmg_position"].append(read_floats(f, 3))
-                dmg_normal = read_floats(f, 3)
-                assert all(-1 <= x <= 1. for x in dmg_normal)
-                vtx_dict["dmg_normal"].append(dmg_normal)
+            hitboxes = []
+            num_deform_verts = read_uint(f)
+            print(f"\nNumber of deformation vertices: {num_deform_verts}")
+            assert num_deform_verts == total_num_verts
+            for _ in range(num_deform_verts):
+                vtx_dict["deform_position"].append(read_floats(f, 3))
+                deform_normal = read_floats(f, 3)
+                assert all(-1 <= x <= 1. for x in deform_normal)
+                vtx_dict["deform_normal"].append(deform_normal)
 
-            num_bones, num_weights = read_uints(f, 2)
-            print(f"Number of \"bones\": {num_bones}")
+            num_octants, num_weights = read_uints(f, 2)
+            print(f"Number of armour octants: {num_octants}")
             print(f"Number of weights: {num_weights}")
-            assert num_bones == 8
+            assert num_octants == 8
             assert num_weights == 2
-            bone_set = set()
-            for _ in range(num_dmg_verts):
-                bone1 = read_uint(f)
-                bone_set.add(bone1)
+            octant_set = set()
+            for _ in range(num_deform_verts):
+                octant1 = read_uint(f)
+                octant_set.add(octant1)
                 weight1 = read_float(f)
-                bone2 = read_uint(f)
-                bone_set.add(bone2)
+                octant2 = read_uint(f)
+                octant_set.add(octant2)
                 weight2 = read_float(f)
                 assert 0. <= weight1 <= 1.
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
-                #print(f"{bone1},\t{weight1},\t{bone2},\t{weight2}")
-                vtx_dict["weight"].append((bone1, weight1, bone2, weight2))
-            assert bone_set == set(range(num_bones))
-            for _ in range(num_bones):
-                vectors1 = []
-                vectors2 = []
+                vtx_dict["weight"].append((octant1, weight1, octant2, weight2))
+            assert octant_set == set(range(num_octants))
+            for _ in range(total_num_pieces):
+                vectors = []
                 for _ in range(3):
-                    vectors1.append(read_floats(f, 3))
-                float1 = read_float(f)
-                for _ in range(3):
-                    vectors2.append(read_floats(f, 3))
-                float2 = read_float(f)
-                bone_stuff.append((vectors1, vectors2, float1, float2))
+                    vectors.append(read_floats(f, 3))
+                flt = read_float(f)
+                hitboxes.append((vectors, flt))
         else:
-            bone_stuff = []
+            hitboxes = []
 
         if mesh_type in ("ARE", "SHL"):
             num_sprite_types = read_uint(f)
@@ -524,7 +518,7 @@ class Mesh:
         assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
 
         if mesh_type == "SHL":
-            vtx_keys = ("position", "normal", "colour", "uv", "material", "dmg_position", "dmg_normal", "weight")
+            vtx_keys = ("position", "normal", "colour", "uv", "material", "deform_position", "deform_normal", "weight")
         else:
             vtx_keys = ("position", "normal", "colour", "uv", "material")
         assert set(vtx_dict.keys()) == set(vtx_keys)
@@ -542,36 +536,27 @@ class Mesh:
         if not os.path.isdir(textures_dir):
             textures_dir = None
     
-        return Mesh(mesh_type, version, face_vertices, locators, bone_stuff, textures_dir)
+        return Mesh(mesh_type, version, face_vertices, locators, hitboxes, textures_dir)
     
-    def add_bone_stuff_to_prim(self, prim):
-        # Remember: the "bone matrix" is 3x3
-        bonemat1_attr = prim.CreateAttribute("bonemats1", Sdf.ValueTypeNames.Matrix3dArray)
-        bonemat2_attr = prim.CreateAttribute("bonemats2", Sdf.ValueTypeNames.Matrix3dArray)
-        bonefloat1_attr = prim.CreateAttribute("bonefloats1", Sdf.ValueTypeNames.FloatArray)
-        bonefloat2_attr = prim.CreateAttribute("bonefloats2", Sdf.ValueTypeNames.FloatArray)
+    def add_hitboxes_to_prim(self, prim):
+        dmgmat_attr = prim.CreateAttribute("dmgmat", Sdf.ValueTypeNames.Matrix3dArray)
+        dmgfloat_attr = prim.CreateAttribute("dmgfloat", Sdf.ValueTypeNames.FloatArray)
 
-        bonemat1_attr.Set([Gf.Matrix3d(b[0]) for b in self._bone_stuff])
-        bonemat2_attr.Set([Gf.Matrix3d(b[1]) for b in self._bone_stuff])
-        bonefloat1_attr.Set([b[2] for b in self._bone_stuff])
-        bonefloat2_attr.Set([b[2] for b in self._bone_stuff])
+        dmgmat_attr.Set([Gf.Matrix3d(hb[0]) for hb in self._hitboxes])
+        dmgfloat_attr.Set([hb[1] for hb in self._hitboxes])
 
     @classmethod
-    def get_bone_stuff_from_prim(cls, prim):
-        bonemats1 = prim.GetAttribute("bonemats1").Get()
-        bonemats2 = prim.GetAttribute("bonemats2").Get()
-        bonefloats1 = prim.GetAttribute("bonefloats1").Get()
-        bonefloats2 = prim.GetAttribute("bonefloats2").Get()
+    def get_hitboxes_from_prim(cls, prim):
+        dmgmats = prim.GetAttribute("dmgmat").Get()
+        dmgfloats = prim.GetAttribute("dmgfloat").Get()
 
-        assert len(bonemats1) == len(bonemats2) == len(bonefloats1) == len(bonefloats2) == 8
-        bone_stuff = []
-        for i in range(len(bonemats1)):
-            bonemat1 = [v for v in bonemats1[i]]
-            bonemat2 = [v for v in bonemats2[i]]
-            bonefloat1 = bonefloats1[i]
-            bonefloat2 = bonefloats2[i]
-            bone_stuff.append((bonemat1, bonemat2, bonefloat1, bonefloat2))
-        return bone_stuff
+        assert len(dmgmats) == len(dmgfloats) == 16
+        hitboxes = []
+        for i in range(len(dmgmats)):
+            dmgmat = [v for v in dmgmats[i]]
+            dmgfloat = dmgfloats[i]
+            hitboxes.append((dmgmat, dmgfloat))
+        return hitboxes
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -668,41 +653,41 @@ class Mesh:
                                                              interpolation="faceVarying")
         st_primvar.Set(fvtx_uvs)
 
-        if self.geometry.has_attribute("dmg_position"):
-            dmg_pos_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_position",
+        if self.geometry.has_attribute("deform_position"):
+            dmg_pos_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("deform_position",
                                                                     Sdf.ValueTypeNames.Point3fArray,
                                                                     interpolation="vertex")
-            vtx_dmg_positions = list(self.geometry.elements().values_of("dmg_position"))#.unique_elements())
-            assert len(points) == len(vtx_dmg_positions)
-            dmg_pos_primvar.Set(vtx_dmg_positions)
+            vtx_deform_positions = list(self.geometry.elements().values_of("deform_position"))#.unique_elements())
+            assert len(points) == len(vtx_deform_positions)
+            dmg_pos_primvar.Set(vtx_deform_positions)
 
-        if self.geometry.has_attribute("dmg_normal"):
-            dmg_normal_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("dmg_normal",
+        if self.geometry.has_attribute("deform_normal"):
+            deform_normal_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("deform_normal",
                                                                         Sdf.ValueTypeNames.Normal3fArray,
                                                                         interpolation="vertex")
-            vtx_dmg_normals = list(self.geometry.elements().values_of("dmg_normal"))#.unique_elements())
-            assert len(points) == len(vtx_dmg_normals)
-            dmg_normal_primvar.Set(vtx_dmg_normals)
+            vtx_deform_normals = list(self.geometry.elements().values_of("deform_normal"))#.unique_elements())
+            assert len(points) == len(vtx_deform_normals)
+            deform_normal_primvar.Set(vtx_deform_normals)
 
         if self.geometry.has_attribute("weight"):
-            boneid1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneid1",
+            octant_id1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_id1",
                                                                     Sdf.ValueTypeNames.IntArray,
                                                                     interpolation="vertex")
-            boneweight1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneweight1",
+            octant_weight1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_weight1",
                                                                         Sdf.ValueTypeNames.FloatArray,
                                                                         interpolation="vertex")
-            boneid2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneid2",
+            octant_id2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_id2",
                                                                     Sdf.ValueTypeNames.IntArray,
                                                                     interpolation="vertex")
-            boneweight2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("boneweight2",
+            octant_weight2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_weight2",
                                                                         Sdf.ValueTypeNames.FloatArray,
                                                                         interpolation="vertex")
             vtx_weights = list(self.geometry.elements().values_of("weight"))#.unique_elements())
             assert len(points) == len(vtx_weights)
-            boneid1_primvar.Set([w[0] for w in vtx_weights])
-            boneweight1_primvar.Set([w[1] for w in vtx_weights])
-            boneid2_primvar.Set([w[2] for w in vtx_weights])
-            boneweight2_primvar.Set([w[3] for w in vtx_weights])
+            octant_id1_primvar.Set([w[0] for w in vtx_weights])
+            octant_weight1_primvar.Set([w[1] for w in vtx_weights])
+            octant_id2_primvar.Set([w[2] for w in vtx_weights])
+            octant_weight2_primvar.Set([w[3] for w in vtx_weights])
 
         piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
                                                                    Sdf.ValueTypeNames.IntArray,
@@ -711,7 +696,7 @@ class Mesh:
 
         # TODO: do the same for colours
 
-        self.add_bone_stuff_to_prim(mesh.GetPrim())
+        self.add_hitboxes_to_prim(mesh.GetPrim())
 
         for loc_name, matrix in self._locators.items():
             gf_matrix = Gf.Matrix4d(matrix)
@@ -813,8 +798,8 @@ class Mesh:
 
         for attrib_name, primvar_name in {
             "uv": "st",
-            "dmg_position": "dmg_position",
-            "dmg_normal": "dmg_normal",
+            "deform_position": "deform_position",
+            "deform_normal": "deform_normal",
             "piece_id": "piece_id"
         }.items():
             if primvars.HasPrimvar(primvar_name):
@@ -846,10 +831,10 @@ class Mesh:
         assert all(materials)
         attrib_dict["material"] = materials
 
-        bone_keys = ("boneid1", "boneweights1", "boneid2", "boneweights2")
-        if all(primvars.HasPrimvar(key) for key in bone_keys):
-            bone_attribs = tuple(facevertex_data_of(key) for key in bone_keys)
-            weights = [tuple(attr[i] for attr in bone_attribs) for i in range(len(bone_attribs[0]))]
+        octant_keys = ("octant_id1", "octant_weight1", "octant_id2", "octant_weight2")
+        if all(primvars.HasPrimvar(key) for key in octant_keys):
+            deform_attribs = tuple(facevertex_data_of(key) for key in octant_keys)
+            weights = [tuple(attr[i] for attr in deform_attribs) for i in range(len(deform_attribs[0]))]
             attrib_dict["weight"] = weights
 
         return Mesh.Geometry(**attrib_dict)
@@ -876,13 +861,13 @@ class Mesh:
                 colour=[],
                 uv=[],
                 material=[],
-                dmg_position=[],
-                dmg_normal=[],
+                deform_position=[],
+                deform_normal=[],
                 weight=[],
                 piece_id=[]
             )
         locators = {}
-        bone_stuff = []
+        hitboxes = []
 
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
@@ -894,12 +879,12 @@ class Mesh:
                 matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
                 locators[loc_name] = [vec for vec in matrix]
             
-            if prim.HasAttribute("bonemats1"):
-                bone_stuff.extend(cls.get_bone_stuff_from_prim(prim))
+            if prim.HasAttribute("dmgmats"):
+                hitboxes.extend(cls.get_hitboxes_from_prim(prim))
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
-                    geometry, locators, bone_stuff, None)
+                    geometry, locators, hitboxes, None)
 
 
 if __name__ == "__main__":
