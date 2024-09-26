@@ -173,8 +173,8 @@ class Mesh:
                 # TODO: this won't be accurate if the centre isn't really the centre
                 self.radius = (self.maxs - self.centre).GetLength()
 
-        def size(self):
-            return self.maxs - self.mins
+        def extent(self):
+            return self.maxs - self.centre
         
         @classmethod
         def read_from_file(cls, f):
@@ -567,11 +567,11 @@ class Mesh:
         return Mesh(mesh_type, version, bounds, face_vertices, locators, hitboxes, textures_dir)
     
     def add_hitboxes_to_prim(self, prim):
-        dmgmat_attr = prim.CreateAttribute("dmgmat", Sdf.ValueTypeNames.Matrix3dArray)
-        dmgfloat_attr = prim.CreateAttribute("dmgfloat", Sdf.ValueTypeNames.FloatArray)
-
-        dmgmat_attr.Set([Gf.Matrix3d(*hb.mins, *hb.maxs, *hb.centre) for hb in self._hitboxes])
-        dmgfloat_attr.Set([hb.radius for hb in self._hitboxes])
+        for i, hitbox in enumerate(self._hitboxes):
+            hitbox_prim_path = prim.GetPath().AppendPath(f"hitbox_{i}")
+            hitbox_cube = UsdGeom.Cube.Define(prim.GetStage(), hitbox_prim_path)
+            UsdGeom.XformCommonAPI(hitbox_cube).SetTranslate(Gf.Vec3d(hitbox.centre))
+            UsdGeom.XformCommonAPI(hitbox_cube).SetScale(hitbox.extent())
 
     @classmethod
     def get_hitboxes_from_prim(cls, prim):
