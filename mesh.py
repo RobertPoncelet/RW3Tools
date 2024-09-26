@@ -613,20 +613,6 @@ class Mesh:
             hitbox_cube = UsdGeom.Cube.Define(prim.GetStage(), hitbox_prim_path)
             UsdGeom.XformCommonAPI(hitbox_cube).SetTranslate(Gf.Vec3d(hitbox.centre))
             UsdGeom.XformCommonAPI(hitbox_cube).SetScale(hitbox.extent())
-
-    @classmethod
-    # TODO: this is the obsolete way of doing it; should remove it
-    def get_hitboxes_from_prim(cls, prim):
-        dmgmats = prim.GetAttribute("dmgmat").Get()
-        dmgfloats = prim.GetAttribute("dmgfloat").Get()
-
-        assert len(dmgmats) == len(dmgfloats) == 16
-        hitboxes = []
-        for i in range(len(dmgmats)):
-            mins, maxs, centre = dmgmats[i]
-            radius = dmgfloats[i]
-            hitboxes.append(Mesh.Bounds(mins, maxs, centre, radius))
-        return hitboxes
     
     @classmethod
     def get_hitboxes_from_geometry(cls, geometry):
@@ -942,7 +928,6 @@ class Mesh:
 
         geometry = None
         locators = {}
-        hitboxes = []
 
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
@@ -956,14 +941,13 @@ class Mesh:
                 loc = UsdGeom.Xform(prim)
                 matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
                 locators[loc_name] = [vec for vec in matrix]
-            
-            if prim.HasAttribute("dmgmat"):
-                hitboxes.extend(cls.get_hitboxes_from_prim(prim))
         
         positions = set(geometry.attribute("position"))
         bounds = Mesh.Bounds.from_points(positions)
-        if not hitboxes and mesh_type == "SHL":
+        if mesh_type == "SHL":
             hitboxes = cls.get_hitboxes_from_geometry(geometry)
+        else:
+            hitboxes = []
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
