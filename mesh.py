@@ -155,6 +155,9 @@ class Mesh:
         self._hitboxes = hitboxes
         self._textures_dir = textures_dir
 
+        if self._mesh_type == "SHL":
+            assert len(self._hitboxes) == 16
+
     class UnsupportedMeshError(Exception):
         pass
 
@@ -175,6 +178,18 @@ class Mesh:
 
         def extent(self):
             return self.maxs - self.centre
+        
+        @classmethod
+        def from_points(cls, points, padding=Gf.Vec3f(0., 0., 0.)):
+            minx = min(v[0] for v in points)
+            miny = min(v[1] for v in points)
+            minz = min(v[2] for v in points)
+            maxx = max(v[0] for v in points)
+            maxy = max(v[1] for v in points)
+            maxz = max(v[2] for v in points)
+            mins = Gf.Vec3f(minx, miny, minz)
+            maxs = Gf.Vec3f(maxx, maxy, maxz)
+            return cls(mins - padding, maxs + padding)
         
         @classmethod
         def read_from_file(cls, f):
@@ -567,13 +582,17 @@ class Mesh:
         return Mesh(mesh_type, version, bounds, face_vertices, locators, hitboxes, textures_dir)
     
     def add_hitboxes_to_prim(self, prim):
+        hitbox_root_path = prim.GetPath().AppendPath("hitboxes")
+        hitbox_root_xform = UsdGeom.Xform.Define(prim.GetStage(), hitbox_root_path)
+        hitbox_root_xform.MakeInvisible()
         for i, hitbox in enumerate(self._hitboxes):
-            hitbox_prim_path = prim.GetPath().AppendPath(f"hitbox_{i}")
+            hitbox_prim_path = hitbox_root_path.AppendPath(f"hitbox_{i}")
             hitbox_cube = UsdGeom.Cube.Define(prim.GetStage(), hitbox_prim_path)
             UsdGeom.XformCommonAPI(hitbox_cube).SetTranslate(Gf.Vec3d(hitbox.centre))
             UsdGeom.XformCommonAPI(hitbox_cube).SetScale(hitbox.extent())
 
     @classmethod
+    # TODO: this is the obsolete way of doing it; should remove it
     def get_hitboxes_from_prim(cls, prim):
         dmgmats = prim.GetAttribute("dmgmat").Get()
         dmgfloats = prim.GetAttribute("dmgfloat").Get()
@@ -584,6 +603,15 @@ class Mesh:
             mins, maxs, centre = dmgmats[i]
             radius = dmgfloats[i]
             hitboxes.append(Mesh.Bounds(mins, maxs, centre, radius))
+        return hitboxes
+    
+    @classmethod
+    def get_hitboxes_from_geometry(cls, geometry):
+        hitboxes = []
+        for piece_id, face_vertices in geometry.elements().ordered_by("piece_id").split_by("piece_id"):
+            hitboxes.append(cls.Bounds.from_points(face_vertices.values_of("position"),
+                                                   padding=Gf.Vec3f(1., 0., 1.)))
+        assert len(hitboxes) == 16
         return hitboxes
     
     def export_to_usd(self, filepath, merge_vertices=False):
@@ -619,6 +647,7 @@ class Mesh:
             if not mat_name or mat_name[0].isnumeric():
                 mat_name = "_" + mat_name
             mat_name = mat_name.replace(" ", "_")
+            mat_name = mat_name.replace("-", "_")
             geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices, "materialBind")
             UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
 
@@ -873,33 +902,16 @@ class Mesh:
         # Load the USD stage
         stage = Usd.Stage.Open(filepath)
 
-        if mesh_type == "MSH":
-            geometry = Mesh.Geometry(
-                position=[],
-                normal=[],
-                colour=[],
-                uv=[],
-                material=[],
-                piece_id=[]
-            )
-        else:
-            geometry = Mesh.Geometry(
-                position=[],
-                normal=[],
-                colour=[],
-                uv=[],
-                material=[],
-                deform_position=[],
-                deform_normal=[],
-                weight=[],
-                piece_id=[]
-            )
+        geometry = None
         locators = {}
         hitboxes = []
 
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Mesh):
-                geometry.merge(cls.get_geometry(prim))
+                if not geometry:
+                    geometry = cls.get_geometry(prim)
+                else:
+                    geometry.merge(cls.get_geometry(prim))
             
             if prim.IsA(UsdGeom.Xform) and not prim.GetChildren():
                 loc_name = prim.GetName()
@@ -907,17 +919,13 @@ class Mesh:
                 matrix = loc.ComputeLocalToWorldTransform(time=Usd.TimeCode.Default())
                 locators[loc_name] = [vec for vec in matrix]
             
-            if prim.HasAttribute("dmgmats"):
+            if prim.HasAttribute("dmgmat"):
                 hitboxes.extend(cls.get_hitboxes_from_prim(prim))
         
         positions = set(geometry.attribute("position"))
-        minx = min(v[0] for v in positions)
-        miny = min(v[1] for v in positions)
-        minz = min(v[2] for v in positions)
-        maxx = max(v[0] for v in positions)
-        maxy = max(v[1] for v in positions)
-        maxz = max(v[2] for v in positions)
-        bounds = Mesh.Bounds(Gf.Vec3f(minx, miny, minz), Gf.Vec3f(maxx, maxy, maxz))
+        bounds = Mesh.Bounds.from_points(positions)
+        if not hitboxes:
+            hitboxes = cls.get_hitboxes_from_geometry(geometry)
 
         print(f"Mesh successfully imported from USD: {filepath}")
         return Mesh(mesh_type, Mesh.type_version_defaults[mesh_type],
