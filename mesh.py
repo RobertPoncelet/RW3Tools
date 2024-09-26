@@ -135,7 +135,10 @@ def to_tri_array(fvtx_array):
     return tri_array
 
 def to_fvtx_array(tri_array):
-    return [[item] * 3 for item in tri_array]
+    ret = []
+    for item in tri_array:
+        ret.extend([item] * 3)
+    return ret
 
 
 class Mesh:
@@ -158,6 +161,7 @@ class Mesh:
         self.validate_attribs()
     
     def validate_attribs(self):
+        # TODO: "weight" is misleading since it's actually made up of 4 USD primvars
         mesh_attribs = {
             "MSH": {"position", "normal", "colour", "uv", "material"},
             "ARE": {"position", "normal", "colour", "uv", "material"},
@@ -169,6 +173,7 @@ class Mesh:
         
         if self._mesh_type == "SHL":
             assert len(self._hitboxes) == 16
+            assert "p" in self._locators
         elif not mesh_attribs["SHL"].difference(our_attribs):
             print("Mesh has all the required attributes for SHL (armour) type. "
                   "If you meant to use this type, run the same command with \"--mesh-type SHL\".")
@@ -869,12 +874,14 @@ class Mesh:
         primvars = UsdGeom.PrimvarsAPI(mesh_prim)
         def facevertex_data_of(primvar_name):
             primvar = primvars.GetPrimvar(primvar_name)
-            if primvar.GetInterpolation() == "vertex":
+            interp = primvar.GetInterpolation()
+            if interp == "vertex":
                 return flatten_array(usd_fvtx_indices, primvar.Get())
-            elif primvar.GetInterpolation() == "faceVarying":
+            elif interp == "uniform":
+                return to_fvtx_array(primvar.Get())
+            elif interp == "faceVarying":
                 return primvar.Get()
             else:
-                interp = primvar.GetInterpolation()
                 raise ValueError(f"Unrecognised primvar interpolation type: {interp}")
 
         for attrib_name, primvar_name in {
@@ -884,7 +891,13 @@ class Mesh:
             "piece_id": "piece_id"
         }.items():
             if primvars.HasPrimvar(primvar_name):
-                attrib_dict[attrib_name] = facevertex_data_of(primvar_name)
+                attribute = facevertex_data_of(primvar_name)
+                # TODO: this... isn't very neat
+                if attrib_name.endswith("_position"):
+                    attribute = [transform.Transform(p) for p in attribute]
+                elif attrib_name.endswith("_normal"):
+                    attribute = [transform.TransformDir(n) for n in attribute]
+                attrib_dict[attrib_name] = attribute
 
         if "piece_id" not in attrib_dict:
             attrib_dict["piece_id"] = [0] * len(usd_fvtx_indices)
@@ -912,6 +925,7 @@ class Mesh:
         assert all(materials)
         attrib_dict["material"] = materials
 
+        # TODO: should probably just flatten this into four separate attributes to keep things simple
         octant_keys = ("octant_id1", "octant_weight1", "octant_id2", "octant_weight2")
         if all(primvars.HasPrimvar(key) for key in octant_keys):
             deform_attribs = tuple(facevertex_data_of(key) for key in octant_keys)
