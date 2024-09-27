@@ -161,11 +161,12 @@ class Mesh:
         self.validate_attribs()
     
     def validate_attribs(self):
-        # TODO: "weight" is misleading since it's actually made up of 4 USD primvars
         mesh_attribs = {
             "MSH": {"position", "normal", "colour", "uv", "material"},
             "ARE": {"position", "normal", "colour", "uv", "material"},
-            "SHL": {"position", "normal", "colour", "uv", "material", "deform_position", "deform_normal", "weight"}
+            "SHL": {"position", "normal", "colour", "uv", "material", "piece_id",
+                    "deform_position", "deform_normal",
+                    "octant_id1", "octant_id2", "octant_weight1", "octant_weight2"}
         }
         our_attribs = set(self.geometry.attrib_names())
         missing = mesh_attribs[self._mesh_type].difference(our_attribs)
@@ -426,11 +427,10 @@ class Mesh:
             write_uint(f, num_octants)
             write_uint(f, 2)  # Number of weights per vertex
             for v in vertices:
-                octant1, weight1, octant2, weight2 = v.attr("weight")
-                write_uint(f, octant1)
-                write_float(f, weight1)
-                write_uint(f, octant2)
-                write_float(f, weight2)
+                write_uint(f, v.attr("octant_id1"))
+                write_float(f, v.attr("octant_weight1"))
+                write_uint(f, v.attr("octant_id2"))
+                write_float(f, v.attr("octant_weight2"))
             for hitbox in self._hitboxes:
                 hitbox.write_to_file(f)
             
@@ -555,7 +555,10 @@ class Mesh:
                 assert 0. <= weight1 <= 1.
                 assert 0. <= weight2 <= 1.
                 assert abs(1 - (weight1 + weight2)) < 0.01  # They should add up to 1
-                vtx_dict["weight"].append((octant1, weight1, octant2, weight2))
+                vtx_dict["octant_id1"].append(octant1)
+                vtx_dict["octant_id2"].append(octant2)
+                vtx_dict["octant_weight1"].append(weight1)
+                vtx_dict["octant_weight2"].append(weight2)
             assert octant_set == set(range(num_octants))
             for _ in range(total_num_pieces):
                 hitboxes.append(Mesh.Bounds.read_from_file(f))
@@ -584,7 +587,8 @@ class Mesh:
         assert next_part in (b"DYS\x01", b"STS\x00") or not next_part
 
         if mesh_type == "SHL":
-            vtx_keys = ("position", "normal", "colour", "uv", "material", "deform_position", "deform_normal", "weight")
+            vtx_keys = ("position", "normal", "colour", "uv", "material", "deform_position", "deform_normal",
+                        "octant_id1", "octant_id2", "octant_weight1", "octant_weight2")
         else:
             vtx_keys = ("position", "normal", "colour", "uv", "material")
         assert set(vtx_dict.keys()) == set(vtx_keys)
@@ -725,46 +729,24 @@ class Mesh:
                                                              interpolation="faceVarying")
         st_primvar.Set(fvtx_uvs)
 
-        if self.geometry.has_attribute("deform_position"):
-            dmg_pos_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("deform_position",
-                                                                    Sdf.ValueTypeNames.Point3fArray,
-                                                                    interpolation="vertex")
-            vtx_deform_positions = list(self.geometry.elements().values_of("deform_position"))#.unique_elements())
-            assert len(points) == len(vtx_deform_positions)
-            dmg_pos_primvar.Set(vtx_deform_positions)
-
-        if self.geometry.has_attribute("deform_normal"):
-            deform_normal_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("deform_normal",
-                                                                        Sdf.ValueTypeNames.Normal3fArray,
-                                                                        interpolation="vertex")
-            vtx_deform_normals = list(self.geometry.elements().values_of("deform_normal"))#.unique_elements())
-            assert len(points) == len(vtx_deform_normals)
-            deform_normal_primvar.Set(vtx_deform_normals)
-
-        if self.geometry.has_attribute("weight"):
-            octant_id1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_id1",
-                                                                    Sdf.ValueTypeNames.IntArray,
-                                                                    interpolation="vertex")
-            octant_weight1_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_weight1",
-                                                                        Sdf.ValueTypeNames.FloatArray,
-                                                                        interpolation="vertex")
-            octant_id2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_id2",
-                                                                    Sdf.ValueTypeNames.IntArray,
-                                                                    interpolation="vertex")
-            octant_weight2_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("octant_weight2",
-                                                                        Sdf.ValueTypeNames.FloatArray,
-                                                                        interpolation="vertex")
-            vtx_weights = list(self.geometry.elements().values_of("weight"))#.unique_elements())
-            assert len(points) == len(vtx_weights)
-            octant_id1_primvar.Set([w[0] for w in vtx_weights])
-            octant_weight1_primvar.Set([w[1] for w in vtx_weights])
-            octant_id2_primvar.Set([w[2] for w in vtx_weights])
-            octant_weight2_primvar.Set([w[3] for w in vtx_weights])
-
         piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
                                                                    Sdf.ValueTypeNames.IntArray,
                                                                    interpolation="faceVarying")
         piece_id_primvar.Set(list(self.geometry.elements().values_of("piece_id")))
+
+        def convert_vtx_attrib_to_primvar(attrib_name, value_type):
+            primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(attrib_name, value_type,
+                                                              interpolation="vertex")
+            attrib_values = list(self.geometry.elements().values_of(attrib_name))#.unique_elements())
+            assert len(points) == len(attrib_values)
+            primvar.Set(attrib_values)
+        
+        convert_vtx_attrib_to_primvar("deform_position", Sdf.ValueTypeNames.Point3fArray)
+        convert_vtx_attrib_to_primvar("deform_normal", Sdf.ValueTypeNames.Normal3fArray)
+        convert_vtx_attrib_to_primvar("octant_id1", Sdf.ValueTypeNames.IntArray)
+        convert_vtx_attrib_to_primvar("octant_id2", Sdf.ValueTypeNames.IntArray)
+        convert_vtx_attrib_to_primvar("octant_weight1", Sdf.ValueTypeNames.FloatArray)
+        convert_vtx_attrib_to_primvar("octant_weight2", Sdf.ValueTypeNames.FloatArray)
 
         # TODO: do the same for colours
 
@@ -862,28 +844,33 @@ class Mesh:
             primvar = primvars.GetPrimvar(primvar_name)
             interp = primvar.GetInterpolation()
             if interp == "vertex":
-                return flatten_array(usd_fvtx_indices, primvar.Get())
+                fvtx_data = flatten_array(usd_fvtx_indices, primvar.Get())
             elif interp == "uniform":
-                return to_fvtx_array(primvar.Get())
+                fvtx_data = to_fvtx_array(primvar.Get())
             elif interp == "faceVarying":
-                return primvar.Get()
+                fvtx_data = primvar.Get()
             else:
                 raise ValueError(f"Unrecognised primvar interpolation type: {interp}")
+            
+            if primvar.GetTypeName() == Sdf.ValueTypeNames.Point3fArray:
+                fvtx_data = [transform.Transform(p) for p in fvtx_data]
+            elif primvar.GetTypeName() == Sdf.ValueTypeNames.Normal3fArray:
+                fvtx_data = [transform.TransformDir(n) for n in fvtx_data]
+
+            return fvtx_data
 
         for attrib_name, primvar_name in {
             "uv": "st",
             "deform_position": "deform_position",
             "deform_normal": "deform_normal",
-            "piece_id": "piece_id"
+            "piece_id": "piece_id",
+            "octant_id1": "octant_id1",
+            "octant_id2": "octant_id2",
+            "octant_weight1": "octant_weight1",
+            "octant_weight2": "octant_weight2"
         }.items():
             if primvars.HasPrimvar(primvar_name):
-                attribute = facevertex_data_of(primvar_name)
-                # TODO: this... isn't very neat
-                if attrib_name.endswith("_position"):
-                    attribute = [transform.Transform(p) for p in attribute]
-                elif attrib_name.endswith("_normal"):
-                    attribute = [transform.TransformDir(n) for n in attribute]
-                attrib_dict[attrib_name] = attribute
+                attrib_dict[attrib_name] = facevertex_data_of(primvar_name)
 
         if "piece_id" not in attrib_dict:
             attrib_dict["piece_id"] = [0] * len(usd_fvtx_indices)
@@ -910,13 +897,6 @@ class Mesh:
                 materials[start + 2] = material
         assert all(materials)
         attrib_dict["material"] = materials
-
-        # TODO: should probably just flatten this into four separate attributes to keep things simple
-        octant_keys = ("octant_id1", "octant_weight1", "octant_id2", "octant_weight2")
-        if all(primvars.HasPrimvar(key) for key in octant_keys):
-            deform_attribs = tuple(facevertex_data_of(key) for key in octant_keys)
-            weights = [tuple(attr[i] for attr in deform_attribs) for i in range(len(deform_attribs[0]))]
-            attrib_dict["weight"] = weights
 
         return Mesh.Geometry(**attrib_dict)
 
