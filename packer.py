@@ -4,6 +4,7 @@ import re
 import struct
 import subprocess
 from multiprocessing import Pool, cpu_count
+from shutil import which
 
 
 def byte_pad_string(string):
@@ -16,17 +17,24 @@ def to_compressed_path(path):
     return os.path.join(os.path.dirname(path), ".compressed", f"{os.path.basename(path)}.rnc")
 
 
-def compressed(path, force=False):
+def compressed(path, ignore_cache=False):
     compressed_path = to_compressed_path(path)
     if (os.path.isfile(compressed_path)
-        and not force and os.path.getmtime(path) < os.path.getmtime(compressed_path)):
+        and not ignore_cache and os.path.getmtime(path) < os.path.getmtime(compressed_path)):
+            # All conditions are satisfied for us to use the cached version
             return compressed_path
+    
+    executable = "rnc_lib"
+    if not which(executable):
+        raise RuntimeError(f"{executable}.exe is missing from both the current directory and your "
+                           "PATH. Ensure RNC ProPackED is available in one of these locations, or "
+                           "use the --no-compress flag.")
     
     os.makedirs(os.path.dirname(compressed_path), exist_ok=True)
 
     print(f"Compressing {path}...")
     command = [
-        'rnc_lib.exe', 'p', path, compressed_path, '-m=1'
+        executable, 'p', path, compressed_path, '-m=1'
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL)
     return compressed_path
@@ -35,11 +43,11 @@ def compressed(path, force=False):
 class IndexFileEntry:
     exclude_list = None
 
-    def __init__(self, filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file):
+    def __init__(self, filename, offset, unpacked_size, packed_size, is_compressed, is_ghost_file):
         self.filename = filename
         self._offset = offset
-        self._uncompressed_size = uncompressed_size
-        self._compressed_size = compressed_size
+        self._unpacked_size = unpacked_size
+        self._packed_size = packed_size
         self._is_compressed = is_compressed
         self._is_ghost_file = is_ghost_file
     
@@ -61,40 +69,40 @@ class IndexFileEntry:
         header = data_file.read(4)
         if header == b"RNC\x01":  # RNC compression
             self._is_compressed = True
-            self._uncompressed_size = struct.unpack_from('>I', data_file.read(4))[0]
-            print(f"Real uncompressed size of {self.filename}: {self._uncompressed_size}")
-            self._compressed_size = struct.unpack_from('>I', data_file.read(4))[0]
-            self._compressed_size += 18  # Account for the RNC header
-            print(f"Real compressed size of {self.filename}: {self._compressed_size}")
+            self._unpacked_size = struct.unpack_from('>I', data_file.read(4))[0]
+            print(f"Real uncompressed size of {self.filename}: {self._unpacked_size}")
+            self._packed_size = struct.unpack_from('>I', data_file.read(4))[0]
+            self._packed_size += 18  # Account for the RNC header
+            print(f"Real compressed size of {self.filename}: {self._packed_size}")
         else:
             assert not self.is_compressed()
             # Fuck knows
-            self._compressed_size = self._uncompressed_size = 0x800
+            self._packed_size = self._unpacked_size = 0x800
 
     def write_packed_asset_to_data_file(self, packed_data, data_file, current_offset):
         # This is mainly so we can update our offset
         self._offset = current_offset
-        assert len(packed_data) == self.compressed_file_size()
+        assert len(packed_data) == self.packed_data_size()
         data_file.write(packed_data)
         CHUNK_SIZE = 4  # Use 0x80 to get the original 2KB optimised for CD reading
         padding_length = (CHUNK_SIZE - (len(packed_data) % CHUNK_SIZE)) % CHUNK_SIZE
         data_file.write(b'\x00' * padding_length)
-        current_offset = self.offset() + self.compressed_file_size() + padding_length
+        current_offset = self.offset() + self.packed_data_size() + padding_length
         return current_offset
 
     def is_ghost_file(self):
         return self._is_ghost_file
     
     def _file_size(self, compressed):
-        size = self._compressed_size if compressed else self._uncompressed_size
+        size = self._packed_size if compressed else self._unpacked_size
         if not size:
             raise ValueError("Size can't be 0! Should probably update this entry from the data file first.")
         return size
 
-    def uncompressed_file_size(self):
+    def unpacked_data_size(self):
         return self._file_size(False)
     
-    def compressed_file_size(self):
+    def packed_data_size(self):
         return self._file_size(True)
 
     def is_compressed(self):
@@ -103,20 +111,20 @@ class IndexFileEntry:
     def write_to_file(self, file):
         # Serialize the file entry and filename
         if self.is_ghost_file():
-            uncompressed_size = packed_compression = 0
+            unpacked_size = packed_size = 0
         else:
-            uncompressed_size = self.uncompressed_file_size()
-            packed_compression = self.compressed_file_size()
+            unpacked_size = self.unpacked_data_size()
+            packed_size = self.packed_data_size()
 
         if self.is_compressed():
-            packed_compression |= (1 << 31)
+            packed_compression = packed_size | (1 << 31)
         else:
-            packed_compression &= ~(1 << 31)
+            packed_compression = packed_size & ~(1 << 31)
 
         packed_entry = struct.pack('<IIII', 
                                    self.entry_size(),
                                    self.offset(),
-                                   uncompressed_size,
+                                   unpacked_size,
                                    packed_compression
                                   )
         file.write(packed_entry + byte_pad_string(self.filename))
@@ -127,21 +135,20 @@ class IndexFileEntry:
         entry_data = file.read(entry_size - 4)
 
         # Deserialize the file entry
-        offset, uncompressed_size, packed_compression = struct.unpack_from('<III', entry_data)
+        offset, unpacked_size, packed_compression = struct.unpack_from('<III', entry_data)
         is_compressed = bool(packed_compression & (1 << 31))
-        compressed_size = packed_compression & 0x7FFFFFFF
-        is_ghost_file = compressed_size == 0 and uncompressed_size == 0
+        packed_size = packed_compression & 0x7FFFFFFF
+        is_ghost_file = packed_size == 0 and unpacked_size == 0
 
         # Deserialize the filename
         filename = entry_data[12:].decode('ascii').rstrip('\x00')
 
-        return cls(filename, offset, uncompressed_size, compressed_size, is_compressed, is_ghost_file)
+        return cls(filename, offset, unpacked_size, packed_size, is_compressed, is_ghost_file)
     
     @classmethod
     def should_pack_compressed(cls, path):
         if cls.exclude_list == None:
             exclude_list_path = os.path.join(os.path.dirname(path), "..", "Graphics", "noncomp.txt")
-            print(exclude_list_path)
             if os.path.isfile(exclude_list_path):
                 with open(exclude_list_path) as f:
                     cls.exclude_list = {s.strip() for s in f.readlines()}
@@ -150,31 +157,32 @@ class IndexFileEntry:
 
         asset_name = os.path.splitext(os.path.basename(path))[0]
         if asset_name in cls.exclude_list:
+            print(f"Skipping compression of {asset_name}")
             return False
         
-        uncompressed_size = os.path.getsize(path)
+        unpacked_size = os.path.getsize(path)
         try:
-            compressed_size = os.path.getsize(compressed(path))
+            packed_size = os.path.getsize(compressed(path))
         except subprocess.CalledProcessError:
             print(f"Failed to compress {os.path.basename(path)}")
             return False
 
-        return compressed_size < uncompressed_size
+        return packed_size < unpacked_size
 
     @classmethod
-    def from_path(cls, path):
+    def from_path(cls, path, no_compress):
         assert os.path.isfile(path)
         filename = os.path.basename(path)
         assert not filename.startswith(".")
 
-        should_pack_compressed = cls.should_pack_compressed(path)
-        uncompressed_size = os.path.getsize(path)
-        compressed_size = os.path.getsize(compressed(path)) if should_pack_compressed else uncompressed_size
+        unpacked_size = os.path.getsize(path)
+        should_pack_compressed = False if no_compress else cls.should_pack_compressed(path)
+        packed_size = os.path.getsize(compressed(path)) if should_pack_compressed else unpacked_size
 
         return IndexFileEntry(filename,
                               None,  # The offset is calculated later
-                              uncompressed_size=uncompressed_size,
-                              compressed_size=compressed_size,
+                              unpacked_size=unpacked_size,
+                              packed_size=packed_size,
                               is_compressed=should_pack_compressed,
                               is_ghost_file=False)
 
@@ -256,7 +264,7 @@ class IndexSection:
         return cls(section_name=section_name, entries=entries)
     
     @classmethod
-    def from_path(cls, asset_dir, section_name):
+    def from_path(cls, asset_dir, section_name, no_compress):
         # Replicate the filename ordering of the original index file
         def filename_key(filename):
             filename = filename.lower().replace("_", "~")
@@ -274,7 +282,7 @@ class IndexSection:
             filepath = os.path.join(path, filename)
             if not os.path.isfile(filepath) or filename.startswith("."):
                 continue
-            entries.append(IndexFileEntry.from_path(filepath))
+            entries.append(IndexFileEntry.from_path(filepath, no_compress))
         return cls(section_name, entries)
 
 
@@ -302,12 +310,12 @@ class AssetIndex:
         return cls(sections=sections)
     
     @classmethod
-    def from_asset_dir(cls, asset_dir: str):
+    def from_asset_dir(cls, asset_dir: str, no_compress: bool):
         sections = []
         for section_name in IndexSection.SECTION_NAMES:
             section_path = os.path.join(asset_dir, section_name)
-            if os.path.isdir(section_path):
-                sections.append(IndexSection.from_path(asset_dir, section_name))
+            assert os.path.isdir(section_path)
+            sections.append(IndexSection.from_path(asset_dir, section_name, no_compress))
 
         return cls(sections)
 
@@ -319,6 +327,9 @@ class AssetData:
 
     def extract_files(self, output_dir, only_section=None, only_filename=None):
         os.makedirs(output_dir, exist_ok=True)
+
+        executable = "rnc_lib"
+        executable_path = which(executable)
 
         tasks = []
         with open(self.data_file_path, "rb") as data_file:
@@ -333,6 +344,11 @@ class AssetData:
                     do_section = section.extracted_dir_name() == only_section or not only_section
                     do_file = entry.filename == only_filename or not only_filename
                     if do_section and do_file:
+                        if entry.is_compressed() and not executable_path:
+                            raise RuntimeError(f"{executable}.exe is missing from both the current"
+                                               " directory and your PATH. Ensure RNC ProPackED is "
+                                               "available in one of these locations.")
+
                         tasks.append((self.data_file_path, output_file_path, entry))
 
         # Run extraction tasks in parallel using multiprocessing
@@ -344,7 +360,7 @@ class AssetData:
         if entry.is_compressed():
             print(f"Decompressing {entry.filename}...")
             command = [
-                'rnc_lib.exe', 'u', data_file_path, output_file_path, f'-i={entry.offset():X}'
+                'rnc_lib', 'u', data_file_path, output_file_path, f'-i={entry.offset():X}'
             ]
             subprocess.check_call(command, stdout=subprocess.DEVNULL)
             
@@ -357,10 +373,10 @@ class AssetData:
             with open(data_file_path, "rb") as data_file:
                 data_file.seek(entry.offset())
                 with open(output_file_path, "wb") as out_file:
-                    out_file.write(data_file.read(entry.compressed_file_size()))
+                    out_file.write(data_file.read(entry.packed_data_size()))
         print(f'Extracted {entry.filename} to {output_file_path}.')
 
-    def pack_files(self, asset_dir, force_compress=False):
+    def pack_files(self, asset_dir, ignore_cache):
         with open(self.data_file_path, 'wb') as data_file:
             current_offset = 0
             num_writes = 0
@@ -371,7 +387,7 @@ class AssetData:
                     input_file_path = os.path.join(section_dir, entry.filename)
 
                     if entry.is_compressed():
-                        input_file_path = compressed(input_file_path, force=force_compress)
+                        input_file_path = compressed(input_file_path, ignore_cache)
 
                     with open(input_file_path, 'rb') as f:
                         packed_data = f.read()
@@ -384,8 +400,8 @@ class AssetData:
         print(f"Packed {num_writes} files.")
 
     @classmethod
-    def from_asset_dir(cls, asset_dir, data_file_path):
-        asset_index = AssetIndex.from_asset_dir(asset_dir)
+    def from_asset_dir(cls, asset_dir, data_file_path, no_compress):
+        asset_index = AssetIndex.from_asset_dir(asset_dir, no_compress)
         return cls(asset_index, data_file_path)
 
 
@@ -406,7 +422,8 @@ if __name__ == "__main__":
     pack_parser.add_argument("asset_dir", help="Directory containing assets to pack")
     pack_parser.add_argument("index_file", help="Path to save the index file (.idx)")
     pack_parser.add_argument("data_file", help="Path to save the data file (.dat)")
-    pack_parser.add_argument("--force-compress", required=False, action="store_true")
+    pack_parser.add_argument("--no-cache", required=False, action="store_true")
+    pack_parser.add_argument("--no-compress",  required=False, action="store_true")
 
     args = parser.parse_args()
 
@@ -417,8 +434,8 @@ if __name__ == "__main__":
         asset_data.extract_files(args.output_dir, only_section=args.section, only_filename=args.filename)
         print("Unpacking complete!")
     elif args.command == "pack":
-        asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file)
-        asset_data.pack_files(args.asset_dir, force_compress=args.force_compress)
+        asset_data = AssetData.from_asset_dir(args.asset_dir, args.data_file, args.no_compress)
+        asset_data.pack_files(args.asset_dir, ignore_cache=args.no_cache)
         with open(args.index_file, 'wb') as f:
             asset_data.asset_index.write_to_file(f)
         print("Packing complete!")
