@@ -17,11 +17,16 @@ def to_compressed_path(path):
     return os.path.join(os.path.dirname(path), ".compressed", f"{os.path.basename(path)}.rnc")
 
 
+# `ignore_cache` refers to on-disk cache, not this set
+already_compressed = set()
 def compressed(path, ignore_cache=False):
     compressed_path = to_compressed_path(path)
+    if compressed_path in already_compressed:
+        return compressed_path
     if (os.path.isfile(compressed_path)
         and not ignore_cache and os.path.getmtime(path) < os.path.getmtime(compressed_path)):
             # All conditions are satisfied for us to use the cached version
+            already_compressed.add(compressed_path)
             return compressed_path
     
     executable = "rnc_lib"
@@ -37,6 +42,7 @@ def compressed(path, ignore_cache=False):
         executable, 'p', path, compressed_path, '-m=1'
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL)
+    already_compressed.add(compressed_path)
     return compressed_path
 
 
