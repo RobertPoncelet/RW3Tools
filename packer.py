@@ -370,16 +370,15 @@ class AssetData:
             ]
             subprocess.check_call(command, stdout=subprocess.DEVNULL)
             
-            # Previously we'd extract the file verbatim for caching purposes, but it seems there's
-            # a small discrepancy between the RNC compression used in the original game and that
-            # available to us now. Both read/write just fine, but the size difference of the 
-            # resulting files causes issues when repacking.
-            # directly_extracted_path = to_compressed_path(output_file_path)
+            # Extract the file verbatim for caching
+            directly_extracted_path = to_compressed_path(output_file_path)
         else:
-            with open(data_file_path, "rb") as data_file:
-                data_file.seek(entry.offset())
-                with open(output_file_path, "wb") as out_file:
-                    out_file.write(data_file.read(entry.packed_data_size()))
+            directly_extracted_path = output_file_path
+
+        with open(data_file_path, "rb") as data_file:
+            data_file.seek(entry.offset())
+            with open(directly_extracted_path, "wb") as out_file:
+                out_file.write(data_file.read(entry.packed_data_size()))
         print(f'Extracted {entry.filename} to {output_file_path}.')
 
     def pack_files(self, asset_dir, ignore_cache):
