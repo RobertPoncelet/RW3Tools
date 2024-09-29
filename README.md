@@ -1,7 +1,7 @@
 ## Overview
 These tools allow the unpacking and re-packing of Robot Wars: Extreme Destruction game assets on PC, as well as bidirectional conversion between the game's native mesh format and USD. This makes mods possible, including graphical ones.
 ![size:medium](maxwellbot.png)
-For full disclosure: I used ChatGPT to help write some of the boilerplate and USD handling code in the project's early stages. Since I'm not asking for credit, I hope this will be a moot point.
+For full disclosure: I used ChatGPT to help write some of the boilerplate and USD handling code in the project's early stages. For this reason, I'm releasing it under the public domain.
 
 ## Requirements
 * Windows (maybe the game works with Wine/Proton, but I haven't tested it)
@@ -75,7 +75,8 @@ If you're familiar with USD, geometry is converted in the standard way you'd exp
 * The game's up axis is Y - use Blender's "Convert Orientation" export option if necessary.
 * The game uses a co-ordinate system with different handedness which is not handled by the conversion, so meshes will be flipped on a horizontal axis. This may be fixed in the future.
 * Input meshes must be triangulated - Blender has an export option for this too.
-* Armour meshes (i.e. those with filenames like "\<robot name>**s**.rwm") require some custom data to work with the game's damage system. This repo includes an example .blend file which uses geometry nodes to generate this custom data for any mesh, albeit with a far-from-perfect result. More details below.
+* Converting RWM to USD will attempt to use the mesh's original diffuse texture if the RWM exists in its original location alongside the unpacked files. However, converting USD to RWM will only use the USD's material name, and assumes that a diffuse texture with that name will exist in-game.
+* Armour meshes (i.e. those with filenames like "\<robot name>**s**.rwm") require some custom data to work with the game's damage system. More details below.
 
 ## Authoring Meshes
 Meshes (.rwm files) come in several flavours, denoted by the first 3 bytes of the file:
@@ -86,9 +87,30 @@ Meshes (.rwm files) come in several flavours, denoted by the first 3 bytes of th
 * ANM (unsupported): meshes with authored animations e.g. animated menus, crowd members.
 * PRT (unsupported): particle effects, i.e. not really meshes at all.
 
-The RWM file structure splits the mesh geometry into a section for each material, and further splits it into breakable armour pieces if applicable. Each section/piece has its own set of vertices (which each store geometric attributes) and set of triangles (defined by three vertex indices each). The tools will convert triangulated USD geometry to any supported RWM mesh type in the way you would expect, using the standard world-space position, material bindings, and `st` primvar for UVs.
+### SHL Types and the Damage System
+SHL type meshes enable the damage system essential to the game. To explain how to set up your own meshes to fulfil their requirements, let's first go over the damage system itself.
 
-All supported types may also include locators, which are "attachment points" with unique names signifying important locations on the mesh at which other items (weapons, components, particle effects etc.) can be placed. Converting chassis meshes (for example) to USD and inspecting them is the best way to get an idea of how locators work. In USD, they are represented by Xforms with no child prims, which can be exported from Blender using childless Empty objects.
+Robots' armour is split into eight "octants", which you'll already be familiar with from the in-game status UI:
+
+![size:small](octants.png)
+
+As each octant takes damage, it gets crumpled and deformed.
+
+At the same time, armour is also split into 16 "pieces", each of which can break off when they take enough damage. I'm actually not sure whether the deformation and breakable pieces are dependent on each other in any way.
+
+To support the visual effects of these damage features, SHL meshes require some extra data, as mentioned above. These are 7 "primvars" in USD-speak, or "attributes" in Blender-speak:
+* `piece_id` (integer per face): Which breakable piece this face belongs to. Each piece has its own "hitbox" inside which weapons will damage the piece; rw3tools will generate these hitboxes automatically.
+* `deform_position`/`deform_normal` (vectors per vertex): An alternate "deformed" position and normal for this vertex. The vertex blends between its default position/normal and this one based on damage level. (I realise this makes more sense as a blendshape than as primvars, which might be a future change.)
+* `octant_id1`/`octant_id2` (integers per vertex): The octants that this vertex matches most closely and second-most closely. These primvars work with the other two below in a similar way to skin weights on skeletal meshes (which aren't applicable to this game). Inspect the primvars on an imported mesh to get an idea for which octant IDs map to which locations.
+* `octant_weight1`/`octant_weight2` (floats per vertex): How much the vertex is influenced by the damage level of the above octants. These two weights should sum to 1. 
+
+The eight octant damage levels are combined with the four octant primvars to produce a damage level for each vertex, which is then used to blend between the default and deformed position/normal to produce the final rendered geometry.
+
+This repo includes an example Blender scene which uses geometry nodes to generate this custom data for any mesh, albeit with a far-from-perfect result and which might not work for all meshes. 
+
+### Locators
+
+All supported types may include locators, which are "attachment points" with unique names signifying important locations on the mesh at which other items (weapons, components, particle effects etc.) can be placed. Converting chassis meshes (for example) to USD and inspecting them is the best way to get an idea of how locators work. In USD, they are represented by Xforms with no child prims, which can be exported from Blender using childless Empty objects.
 
 Locators for robot components seem to follow a particular naming scheme, combining a prefix, number and sometimes a colour for each name. Here's what the prefixes seem to mean:
 * `w`: Weapon
@@ -117,3 +139,6 @@ These wouldn't require any more investigation of the file format; only filling i
 * Decide whether to invalidate a file's compression cache based on its hash, not modified date
 * A Blender addon for importing/exporting meshes rather than a manually-run script
 * Arena customisation (this might actually be possible already, I just haven't tried it yet)
+
+## License
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/?ref=chooser-v1)
