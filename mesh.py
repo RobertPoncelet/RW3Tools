@@ -224,16 +224,7 @@ class Mesh:
             write_float(f, self.radius)
 
     class Geometry:
-        # TODO: I haven't implemented the below features yet, and I'm not even sure I need to
-        """Generic geometry class which stores arbitrary attributes per-face-vertex and can
-        format them before returning them, in the following ways:
-            * As-is (i.e. per-face-vertex), vs. indexed (i.e. indices mapping each face-vertex to
-              a corresponding vertex) vs. per-triangle
-            * Split by attribute and then vertex (tuple of arrays) vs. vertex and then attribute
-              (array of tuples)
-            * Ordered by a particular attribute
-        """
-
+        """TODO: Write a description"""
         def __init__(self, **kwargs):
             # NOTE: If you're using Python 3.6 or earlier, `kwargs` isn't guaranteed to provide the
             # arguments in the correct order (though it probably will anyway)
@@ -768,55 +759,6 @@ class Mesh:
         stage.GetRootLayer().Save()
 
         print(f"Mesh successfully exported to USD: {filepath}")
-    
-    @staticmethod
-    def get_texture_path(material_prim):
-        # Get the UsdShadeMaterial representation of the prim
-        material = UsdShade.Material(material_prim)
-
-        # Find the surface output of the material
-        surface_output = material.GetSurfaceOutput()
-
-        if not surface_output:
-            print(f"No surface output found for material {material_prim.GetPath()}")
-            return None
-
-        # Get the connected shader for the surface output
-        connected_source = surface_output.GetConnectedSource()
-
-        if not connected_source:
-            print(f"No connected shader found for surface output of material {material_prim.GetPath()}")
-            return None
-
-        shader_prim = connected_source[0]  # The first element is the shader prim
-        shader = UsdShade.Shader(shader_prim)
-
-        # Iterate over the inputs of the shader to find any texture connections
-        for input in shader.GetInputs():
-            if input.GetTypeName() == "Asset":  # The texture file is stored as an Asset
-                file_path = input.Get()
-                if file_path:
-                    print(f"Texture path: {file_path}")
-                    return file_path
-                else:
-                    print(f"No texture path set for input {input.GetBaseName()}")
-            elif input.HasConnectedSource():
-                # Check if this input is connected to another shader (like a texture)
-                connected_shader_source = input.GetConnectedSource()
-                connected_shader_prim = connected_shader_source[0]
-                connected_shader = UsdShade.Shader(connected_shader_prim)
-
-                # Check if this shader is a texture shader (e.g., UsdUVTexture)
-                shader_id = connected_shader.GetIdAttr().Get()
-                if shader_id == "UsdUVTexture":
-                    texture_input = connected_shader.GetInput("file")
-                    if texture_input:
-                        texture_path = texture_input.Get()
-                        print(f"Texture path: {texture_path}")
-                        return texture_path
-
-        print(f"No texture found for material {material_prim.GetPath()}")
-        return None
     
     @classmethod
     def get_material(cls, material_prim):

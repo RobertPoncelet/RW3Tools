@@ -1,5 +1,5 @@
 ## Overview
-These tools allow the unpacking and re-packing of Robot Wars: Extreme Destruction game assets on PC, as well as bidirectional conversion between the game's native mesh format and USD, making graphical mods possible.
+These tools allow the unpacking and re-packing of Robot Wars: Extreme Destruction game assets on PC, as well as bidirectional conversion between the game's native mesh format and USD. This makes mods possible, including graphical ones.
 ![size:medium](maxwellbot.png)
 For full disclosure: I used ChatGPT to help write some of the boilerplate and USD handling code in the project's early stages. Since I'm not asking for credit, I hope this will be a moot point.
 
@@ -45,7 +45,7 @@ Then, run this command: `python -m rw3tools.packer pack <root dir of unpacked fi
 * **No cache**: Ignore the compression cache and re-compress ALL files when packing - see the note below.
 
 > #### A note about compression **(read this if you're not seeing your edits reflected in-game)**
-> Currently, repacking always rewrites lumpy.idx and lumpy.dat in their entirety. Compressing the unpacked files while doing this takes time, so cached versions of the compressed files are stored in a ".compressed" folder next to the unpacked files to avoid having to compress again next time. Currently, the tools detect which files have changed and will need re-compression based on their modification date. If a file you've changed has an old modification date (for example, because it's a copy-paste of another unpacked file) then this change might go undetected and you might not see it in game. There are four ways you can fix this:
+> Currently, repacking always rewrites lumpy.idx and lumpy.dat in their entirety. Compressing the unpacked files while doing this takes time, so cached versions of the compressed files are stored in a ".compressed" folder next to the unpacked files to avoid having to compress again next time. Currently, the tools detect which files have changed and will need re-compression based on their modification date. If a file you've changed has an old modification date (for example, because it's a copy-paste of another unpacked file) then this change might go undetected by the packing process and you might not see it in game. There are four different ways you can fix this:
 > * Update the file's modification date.
 > * Delete the cached compressed version in the ".compressed" subfolder (you may need to display hidden folders in Windows settings in order to see it).
 > * Specify the `--no-compress` flag above.
@@ -55,11 +55,27 @@ You may see some messages about files failing to compress - this is normal, and 
 
 You can also tell the tools to exclude a file from being packed by prepending its name with a dot, e.g. ".myfile.txt". Note that this may hide the file if you don't have "display hidden files" enabled in your Windows settings.
 
-### Mesh Conversion
-TODO
-* To convert or inspect a mesh file (.rwm <-> USD): `python -m rw3tools.mesh <path to input mesh> [<path to output mesh>] [--mesh-type <"MSH", "SHL" or "ARE">] [--merge-vertices]`
+### Custom Robots
+A major feature that re-packing enables is the possibility of fully custom robots, unrestricted by the in-game editor. Technically this is very simple, and can be worked out quite easily by browsing the various unpacked asset files, ideally starting with the plaintext .rob files in the "robots" folder. I might put a guide here later but it's probably not worth it.
 
-## Custom Robots
+However, getting them to look unique is more involved - that's where the mesh conversion ability provided by these tools comes in.
+
+### Mesh Conversion
+You'll notice that in the "Graphics" subfolder of the unpacked files are a lot of textures (.tgas) and ".rwm" files, which are the game's 3D models in their native proprietary format. Using rw3tools, we can convert these to the [USD](https://openusd.org/release/api/index.html) format to inspect how they're set up, and convert our own models from USD to RWM to use them in-game. This readme is geared towards Blender, but should be applicable to any 3D software that supports USD.
+
+To convert or inspect a mesh file, run the following command: `python -m rw3tools.mesh <path to input mesh> [<path to output mesh>] [--mesh-type <"MSH", "SHL" or "ARE">] [--merge-vertices]`
+
+* **Output mesh**: This is an optional argument, because you may just want to validate or view basic info about the input mesh.
+* **Mesh type**: Use this to specify which kind of mesh you want to convert to, explained in more detail below (only applicable when writing to RWM).
+* **Merge vertices (currently broken, I think?)**: Specifying this flag when converting from RWM to USD will use fewer vertices and allow smooth normals in modelling software, but might mess up the normals for "double-sided" geometry. I recommend merging vertices in your 3D software instead for more control.
+
+The format you're converting to/from is deduced automatically from the file extension.
+
+If you're familiar with USD, geometry is converted in the standard way you'd expect, with the following caveats:
+* The game's up axis is Y - use Blender's "Convert Orientation" export option if necessary.
+* The game uses a co-ordinate system with different handedness which is not handled by the conversion, so meshes will be flipped on a horizontal axis. This may be fixed in the future.
+* Input meshes must be triangulated - Blender has an export option for this too.
+* Armour meshes (i.e. those with filenames like "\<robot name>**s**.rwm") require some custom data to work with the game's damage system. This repo includes an example .blend file which uses geometry nodes to generate this custom data for any mesh, albeit with a far-from-perfect result. More details below.
 
 ## Authoring Meshes
 Meshes (.rwm files) come in several flavours, denoted by the first 3 bytes of the file:
@@ -70,19 +86,34 @@ Meshes (.rwm files) come in several flavours, denoted by the first 3 bytes of th
 * ANM (unsupported): meshes with authored animations e.g. animated menus, crowd members.
 * PRT (unsupported): particle effects, i.e. not really meshes at all.
 
-The RWM file spec splits the mesh geometry into a section for each material, and further splits it into breakable armour pieces if applicable. Each section/piece has its own set of vertices (which each store geometric attributes) and set of triangles (defined by three vertex indices each). The tools will convert triangulated USD geometry to any supported RWM mesh type in the way you would expect, using the standard world-space position, material bindings, and `st` primvar for UVs.
+The RWM file structure splits the mesh geometry into a section for each material, and further splits it into breakable armour pieces if applicable. Each section/piece has its own set of vertices (which each store geometric attributes) and set of triangles (defined by three vertex indices each). The tools will convert triangulated USD geometry to any supported RWM mesh type in the way you would expect, using the standard world-space position, material bindings, and `st` primvar for UVs.
 
 All supported types may also include locators, which are "attachment points" with unique names signifying important locations on the mesh at which other items (weapons, components, particle effects etc.) can be placed. Converting chassis meshes (for example) to USD and inspecting them is the best way to get an idea of how locators work. In USD, they are represented by Xforms with no child prims, which can be exported from Blender using childless Empty objects.
 
-## Limitations/Further Work
-There are certain features I didn't implement in order to avoid scope creep and ensure I actually got the project into a usable state. I *may* get around to them later, but I wouldn't count on it. In the meantime, if you want to try yourself, the following info about the internal structure of the file formats might be useful:
+Locators for robot components seem to follow a particular naming scheme, combining a prefix, number and sometimes a colour for each name. Here's what the prefixes seem to mean:
+* `w`: Weapon
+* `d`: Drives
+* `lw`: Locomotion
+* `ps`: Power source
 
-### Collision meshes
+## Limitations/Further Work
+There are certain features I didn't implement in order to avoid scope creep and ensure I actually got the project into a usable state. I *may* get around to them later, but I wouldn't count on it. In the meantime, if you want to try yourself, the following info might be useful:
+
+### Binary Format Stuff
+
+#### Collision meshes
 Currently, custom collision meshes (.col files) are not supported, so you'll need to duplicate an existing one. I have had a quick look at the file format though, and it looks like it starts by defining some collision pieces (each with a number of planes), and then defines faces (or something) which reference those collision pieces by index.
 
-### Shadows
+#### Shadows
 Custom meshes currently don't cast shadows, because these tools don't write the data necessary for them. In the original files, this data appears after the ASCII marker "DYS" (for "dynamic shadows") or "STS" (for "static shadows").
 
-### Specular maps
-Specular maps are referenced by texture name in the same way as diffuse maps, except that they may be an empty string in order to specify *no* specular map, as these tools currently do in all cases. Similar placeholder values are written for some other material attributes, as should be fairly obvious in the code.
+#### Specular maps
+These wouldn't require any more investigation of the file format; only filling in of the placeholder values (empty strings) that the tools currently write. Specular maps are referenced by texture name in the same way as diffuse maps, with an empty string meaning *no* specular map. Similar placeholder values are written for some other material attributes.
 
+### Other Features
+
+* Deformation as a blendshape rather than custom primvars
+* Proper co-ordinate system conversion so meshes aren't "mirrored" between USD and RWM
+* Decide whether to invalidate a file's compression cache based on its hash, not modified date
+* A Blender addon for importing/exporting meshes rather than a manually-run script
+* Arena customisation (this might actually be possible already, I just haven't tried it yet)
