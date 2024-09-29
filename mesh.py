@@ -174,7 +174,8 @@ class Mesh:
         
         if self._mesh_type == "SHL":
             assert len(self._hitboxes) == 16
-            assert "p" in self._locators
+            assert "p" in self._locators, ("SHL (armour) meshes require a locator named \"p\" (an "
+                                           "Empty object in Blender) to mark the origin.")
         elif not mesh_attribs["SHL"].difference(our_attribs):
             print("Mesh has all the required attributes for SHL (armour) type. "
                   "If you meant to use this type, run the same command with \"--mesh-type SHL\".")
@@ -621,9 +622,10 @@ class Mesh:
     @classmethod
     def get_hitboxes_from_geometry(cls, geometry):
         pieces = set(geometry.elements().values_of("piece_id").unique_elements())
-        has_all_pieces = pieces == set(range(16))
-        assert has_all_pieces, (f"SHL (armour) mesh does not include all the required pieces. "
-                                "Ensure that the \"piece_id\" attribute includes integers 0-15.")
+        missing = set(range(16)) - pieces
+        assert not missing, (f"SHL (armour) mesh does not include all the required pieces. "
+                             f"Pieces {', '.join(str(x) for x in missing)} are missing. "
+                             "Ensure that the \"piece_id\" attribute includes integers 0-15.")
         hitboxes = []
         for piece_id, face_vertices in geometry.elements().ordered_by("piece_id").split_by("piece_id"):
             hitboxes.append(cls.Bounds.from_points(face_vertices.values_of("position"),
@@ -724,33 +726,36 @@ class Mesh:
         mesh.GetFaceVertexCountsAttr().Set([3] * len(tri_materials))
 
         # Set UVs (texture coordinates) in a Primvar
-        st_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st",
-                                                             Sdf.ValueTypeNames.TexCoord2fArray,
-                                                             interpolation="faceVarying")
+        primvars = UsdGeom.PrimvarsAPI(mesh)
+        st_primvar = primvars.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
+                                            interpolation="faceVarying")
         st_primvar.Set(fvtx_uvs)
 
-        piece_id_primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("piece_id",
-                                                                   Sdf.ValueTypeNames.IntArray,
-                                                                   interpolation="faceVarying")
+        piece_id_primvar = primvars.CreatePrimvar("piece_id", Sdf.ValueTypeNames.IntArray,
+                                                  interpolation="faceVarying")
         piece_id_primvar.Set(list(self.geometry.elements().values_of("piece_id")))
 
         def convert_vtx_attrib_to_primvar(attrib_name, value_type):
-            primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(attrib_name, value_type,
-                                                              interpolation="vertex")
+            primvar = primvars.CreatePrimvar(attrib_name, value_type, interpolation="vertex")
             attrib_values = list(self.geometry.elements().values_of(attrib_name))#.unique_elements())
             assert len(points) == len(attrib_values)
             primvar.Set(attrib_values)
         
-        convert_vtx_attrib_to_primvar("deform_position", Sdf.ValueTypeNames.Point3fArray)
-        convert_vtx_attrib_to_primvar("deform_normal", Sdf.ValueTypeNames.Normal3fArray)
-        convert_vtx_attrib_to_primvar("octant_id1", Sdf.ValueTypeNames.IntArray)
-        convert_vtx_attrib_to_primvar("octant_id2", Sdf.ValueTypeNames.IntArray)
-        convert_vtx_attrib_to_primvar("octant_weight1", Sdf.ValueTypeNames.FloatArray)
-        convert_vtx_attrib_to_primvar("octant_weight2", Sdf.ValueTypeNames.FloatArray)
+        for attrib_name, value_type in [
+            ("deform_position", Sdf.ValueTypeNames.Point3fArray),
+            ("deform_normal", Sdf.ValueTypeNames.Normal3fArray),
+            ("octant_id1", Sdf.ValueTypeNames.IntArray),
+            ("octant_id2", Sdf.ValueTypeNames.IntArray),
+            ("octant_weight1", Sdf.ValueTypeNames.FloatArray),
+            ("octant_weight2", Sdf.ValueTypeNames.FloatArray),
+        ]:
+            if self.geometry.has_attribute(attrib_name):
+                convert_vtx_attrib_to_primvar(attrib_name, value_type)
 
         # TODO: do the same for colours
 
-        self.add_hitboxes_to_prim(mesh.GetPrim())
+        if self._hitboxes:
+            self.add_hitboxes_to_prim(mesh.GetPrim())
 
         for loc_name, matrix in self._locators.items():
             gf_matrix = Gf.Matrix4d(matrix)
