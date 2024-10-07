@@ -426,6 +426,7 @@ class Mesh:
             for hitbox in self._hitboxes:
                 hitbox.write_to_file(f)
             
+        if self._mesh_type in ("SHL", "ARE"):
             write_uint(f, 0)  # Number of sprite types
 
     @classmethod
