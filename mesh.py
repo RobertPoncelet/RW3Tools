@@ -623,6 +623,16 @@ class Mesh:
             hitboxes.append(cls.Bounds.from_points(face_vertices.values_of("position"),
                                                    padding=Gf.Vec3f(1., 0., 1.)))
         return hitboxes
+
+    @staticmethod
+    def sanitise_name(name):
+        # USD prim names have some restrictions
+        if not name or name[0].isnumeric():
+            name = "_" + name
+        name = name.replace(" ", "_")
+        name = name.replace("-", "_")
+        name = name.replace(".", "_")
+        return name
     
     def export_to_usd(self, filepath, merge_vertices=False):
         print(f"Exporting to USD: {filepath}".center(80, "="))
@@ -631,9 +641,7 @@ class Mesh:
         stage.SetMetadata("upAxis", "Y")
 
         # Create a single mesh node
-        name = os.path.splitext(os.path.basename(filepath))[0]
-        if name[0].isnumeric():
-            name = "_" + name
+        name = self.sanitise_name(os.path.splitext(os.path.basename(filepath))[0])
         mesh = UsdGeom.Mesh.Define(stage, f"/{name}/mesh")
 
         # We use "fvtx" or "vtx" to denote whether the array items are one per face-vertex or one per vertex
@@ -652,14 +660,20 @@ class Mesh:
         mat_to_tri_indices = inverse_index(tri_materials)
 
         # Create face sets for each material
+        mat_names = set()
         for material, tri_indices in mat_to_tri_indices.items():
             mat_name, spec_map, mat_colour = material
 
-            # USD prim names have some restrictions
-            if not mat_name or mat_name[0].isnumeric():
-                mat_name = "_" + mat_name
-            mat_name = mat_name.replace(" ", "_")
-            mat_name = mat_name.replace("-", "_")
+            mat_name = self.sanitise_name(mat_name)
+
+            # Make sure it's unique
+            orig_mat_name = mat_name
+            index = 0
+            while mat_name in mat_names:
+                index += 1
+                mat_name = orig_mat_name + str(index)
+
+            mat_names.add(mat_name)
 
             geom_subset = UsdGeom.Subset.CreateGeomSubset(mesh, mat_name, "face", tri_indices, "materialBind")
             UsdShade.MaterialBindingAPI.Apply(geom_subset.GetPrim())
